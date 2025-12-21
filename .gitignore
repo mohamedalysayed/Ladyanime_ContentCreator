@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# FFmpeg temp
+concat_list.txt
+
+# Data folders (DO NOT COMMIT)
+data/input/
+data/output/
+
+# Whisper cache
+*.wav
+*.mp3
+
+# Gradio cache
+.gradio/
+
+# Build artifacts
+build/
+dist/
+
