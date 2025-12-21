@@ -52,6 +52,7 @@ This is a system meant to be extended, not a black box.
 
 ## 📁 Project Structure
 
+```text
 ladyanime_mvp/
 ├── app/
 │   ├── main.py
@@ -72,6 +73,7 @@ ladyanime_mvp/
 ├── requirements.txt
 ├── README.md
 └── run.sh
+```
 
 ---
 
