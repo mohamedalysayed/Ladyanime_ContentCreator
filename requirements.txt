@@ -1,5 +1,15 @@
+# UI
+gradio>=4.0
+
+# Core
 pydantic>=2.7
 tqdm>=4.66
 rich>=13.7
 pysrt>=1.1.2
+
+# Audio / transcription
+faster-whisper>=1.0.0
+
+# FFmpeg helper (FFmpeg binary is preinstalled on HF)
+ffmpeg-python>=0.2.0
 
