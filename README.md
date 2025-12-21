@@ -6,9 +6,9 @@ This repository contains the MVP implementation, focused on correctness, determi
 
 ---
 
-## ✨ Features (MVP)
+## Features (MVP)
 
-### ✅ Recap Generator
+### Recap Generator
 - Input: full episode video (.mkv / .mp4) + subtitles (.srt)
 - Automatically:
   - Parses subtitles
@@ -16,20 +16,20 @@ This repository contains the MVP implementation, focused on correctness, determi
   - Cuts segments with audio-safe FFmpeg settings
   - Concatenates them into a recap video
 
-### ✅ LadyAnime Label Overlay
+### LadyAnime Label Overlay
 - Optional animated MP4 label overlay
 - Can be applied to:
   - Final recap video
   - Individual segments
 - Adjustable main video height to control label visibility (top/bottom)
 
-### ✅ Automatic Transcription (Optional)
+### Automatic Transcription (Optional)
 - If subtitles are missing:
   - Uses Faster-Whisper
   - Generates subtitles.srt automatically
 - Can be disabled depending on mode (e.g. Shorts)
 
-### ✅ Local Gradio UI
+### Local Gradio UI
 - Upload video & subtitles
 - Fine-tune segmentation parameters
 - Real-time progress bar (per segment)
@@ -38,7 +38,7 @@ This repository contains the MVP implementation, focused on correctness, determi
 
 ---
 
-## 🧠 Design Principles
+## Design Principles
 
 - Local-first (no cloud, no APIs)
 - Deterministic output
@@ -50,7 +50,7 @@ This is a system meant to be extended, not a black box.
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```text
 ladyanime_mvp/
@@ -77,7 +77,7 @@ ladyanime_mvp/
 
 ---
 
-## 🛠 Requirements
+## Requirements
 
 ### System
 - Linux (tested on Ubuntu)
@@ -97,7 +97,7 @@ Installed via requirements.txt:
 
 ---
 
-## 🚀 Installation & Usage
+## Installation & Usage
 
 ### 1. Clone Repository
 git clone https://github.com/<your-username>/ladyanime_mvp.git
@@ -116,7 +116,7 @@ http://127.0.0.1:7860
 
 ---
 
-## 🎛 Gradio Interface
+## Gradio Interface
 
 ### Recap Generator Tab
 - Upload episode video
@@ -138,7 +138,7 @@ http://127.0.0.1:7860
 
 ---
 
-## 📄 segments.json
+## segments.json
 
 Example:
 [
@@ -153,7 +153,7 @@ This file is designed for future AI scene selection.
 
 ---
 
-## 🎥 Label Overlay
+## Label Overlay
 
 - Location:
   data/shorts_label/shortsLabel_LA.mp4
@@ -164,7 +164,7 @@ This file is designed for future AI scene selection.
 
 ---
 
-## ⚠ MVP Limitations
+## MVP Limitations
 
 - Subtitle-based segmentation only
 - No semantic AI yet
@@ -175,7 +175,7 @@ These are intentional MVP boundaries.
 
 ---
 
-## 🧭 Roadmap
+## Roadmap
 
 - YouTube Shorts mode (9:16, 15s/30s/60s)
 - Auto zoom & smart crop
@@ -184,7 +184,7 @@ These are intentional MVP boundaries.
 
 ---
 
-## 📜 License
+## License
 
 MIT License
 
