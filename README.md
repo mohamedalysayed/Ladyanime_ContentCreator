@@ -1,4 +1,4 @@
-# 🎬 LadyAnime Video Engine (MVP)
+# 🎬 LadyAnime Video Engine 
 
 LadyAnime Video Engine is a local-first video processing tool designed to turn long anime episodes into clean recaps and labeled YouTube-ready clips.
 
