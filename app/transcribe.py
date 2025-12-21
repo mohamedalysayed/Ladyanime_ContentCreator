@@ -7,9 +7,10 @@ def transcribe_to_srt(
     srt_out: Path,
     model_name: str = "small",
     language: str | None = None,
-):
+) -> str:
     """
     Transcribe video to SRT using Faster-Whisper.
+    Returns full plain text transcription.
     """
 
     model = WhisperModel(
@@ -23,11 +24,18 @@ def transcribe_to_srt(
         language=language,
     )
 
+    full_text = []
+
     with open(srt_out, "w", encoding="utf-8") as f:
         for i, seg in enumerate(segments, 1):
             start = _fmt(seg.start)
             end = _fmt(seg.end)
-            f.write(f"{i}\n{start} --> {end}\n{seg.text.strip()}\n\n")
+            text = seg.text.strip()
+
+            f.write(f"{i}\n{start} --> {end}\n{text}\n\n")
+            full_text.append(text)
+
+    return "\n".join(full_text)
 
 
 def _fmt(seconds: float) -> str:

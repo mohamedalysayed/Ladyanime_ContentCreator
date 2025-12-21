@@ -107,47 +107,54 @@ def overlay_label(
     video_in: Path,
     label_mp4: Path,
     video_out: Path,
-    video_height: int = 1300,  # 👈 MAIN CONTROL
+    video_height: int = 1300,
 ):
     """
-    Composite layout:
-    - Label video fills 1080x1920 canvas
-    - Main video is scaled DOWN and centered
-    - Label remains visible on top & bottom
+    Shorts composition:
+    LABEL (top)
+    VIDEO (center)
+    LABEL (bottom)
     """
+
+    canvas_w = 1080
+    # canvas_h = 1920 - video_height 
+    canvas_h = 1920
+    video_height =  min(video_height, canvas_h - 2)
+
+    top_h = (canvas_h - video_height) // 2
+    bottom_h = canvas_h - video_height - top_h
+
+    filter_complex = (
+        # Background label (full 9:16)
+        "[0:v]scale=1080:1920,setsar=1[label];"
+
+        # Scale main video to FIT inside label
+        f"[1:v]scale=1080:{video_height}:"
+        "force_original_aspect_ratio=decrease,"
+        "setsar=1[video];"
+
+        # Center overlay
+        "[label][video]overlay="
+        "(W-w)/2:"
+        "(H-h)/2"
+        "[out]"
+    )
 
     cmd = [
         "ffmpeg", "-y",
-
-        # Background label (loop if shorter)
         "-stream_loop", "-1",
         "-i", str(label_mp4),
-
-        # Foreground main video
         "-i", str(video_in),
-
-        "-filter_complex",
-        (
-            # Force label canvas
-            "[0:v]scale=1080:1920,setsar=1[label];"
-
-            # Scale main video DOWN
-            f"[1:v]scale=1080:{video_height}:force_original_aspect_ratio=decrease,"
-            "setsar=1[vid];"
-
-            # Center video on label
-            "[label][vid]overlay=(W-w)/2:(H-h)/2:shortest=1[out]"
-        ),
-
+        "-filter_complex", filter_complex,
         "-map", "[out]",
         "-map", "1:a?",
+        "-shortest",  # 🔑 THIS IS THE FIX
         "-c:v", "libx264",
         "-crf", "18",
         "-preset", "fast",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-b:a", "192k",
-
         str(video_out),
     ]
 

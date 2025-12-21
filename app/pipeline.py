@@ -10,6 +10,10 @@ from .config import AppConfig
 from .ffmpeg_tools import cut_segments, concat_segments, write_segments_json
 from .srt_parser import load_srt
 from .segment_matcher import Segment, build_segments_from_subtitles
+import math
+import subprocess
+# from typing import List
+from .ffmpeg_tools import overlay_label
 
 console = Console()
 
@@ -144,3 +148,120 @@ def run_mvp(
     console.print(f"[bold green]DONE[/bold green] → {out_video}")
 
     return out_video
+
+def run_shorts(
+    video_path: Path,
+    out_dir: Path,
+    clip_duration: int,
+    add_label: bool,
+    video_height: int,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+    max_shorts: Optional[int] = None,
+):
+    """
+    Create shorts WITHOUT subtitles.
+    Cuts fixed-duration clips and optionally applies label.
+    """
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if not video_path.exists():
+        raise FileNotFoundError(f"Missing input video: {video_path}")
+
+    # --------------------------------------------------
+    # 1) Probe video duration  ✅ FIRST
+    # --------------------------------------------------
+    probe_cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(video_path),
+    ]
+
+    duration = float(subprocess.check_output(probe_cmd).decode().strip())
+
+    # --------------------------------------------------
+    # 2) Compute number of shorts
+    # --------------------------------------------------
+    total_clips = max(1, math.floor(duration / clip_duration))
+
+    if max_shorts is not None:
+        total_clips = min(total_clips, max_shorts)
+
+    generated: list[Path] = []
+
+    # --------------------------------------------------
+    # 3) Cut fixed-length shorts
+    # --------------------------------------------------
+    for i in range(total_clips):
+        if progress_cb:
+            progress_cb(i, total_clips)
+
+        start = i * clip_duration
+        out_clip = out_dir / f"short_{i+1:03d}.mp4"
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-ss", str(start),
+            "-t", str(clip_duration),
+            "-i", str(video_path),
+            "-vf", "setsar=1",
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-preset", "fast",
+            "-crf", "20",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-ac", "2",
+            str(out_clip),
+        ]   
+        subprocess.run(cmd, check=True)
+        generated.append(out_clip)
+
+    if not generated:
+        raise RuntimeError("No shorts were generated.")
+
+    # --------------------------------------------------
+    # 4) Optional LadyAnime label
+    # --------------------------------------------------
+    if add_label:
+        label_mp4 = (
+            video_path.parents[2]
+            / "data"
+            / "shorts_label"
+            / "shortsLabel_LA.mp4"
+        )
+
+        labeled_dir = out_dir / "labeled"
+        labeled_dir.mkdir(exist_ok=True)
+
+        labeled: list[Path] = []
+
+        for clip in generated:
+            out_labeled = labeled_dir / clip.name
+
+            overlay_label(
+                video_in=clip,
+                label_mp4=label_mp4,
+                video_out=out_labeled,
+                video_height=video_height,
+            )
+
+            labeled.append(out_labeled)
+
+        generated = labeled
+
+        # Replace originals with labeled versions
+        for f in out_dir.glob("short_*.mp4"):
+            f.unlink()
+
+        for f in labeled:
+            f.rename(out_dir / f.name)
+
+    # --------------------------------------------------
+    # 5) Return ONE path for Gradio
+    # --------------------------------------------------
+    return generated[0]
+

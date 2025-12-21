@@ -40,3 +40,7 @@ data/output/
 build/
 dist/
 
+#data/credentials/
+*.json
+
+
