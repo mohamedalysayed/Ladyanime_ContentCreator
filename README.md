@@ -6,7 +6,7 @@ This repository contains the MVP implementation, focused on correctness, determi
 
 ---
 
-## Features (MVP)
+## Features
 
 ### Recap Generator
 - Input: full episode video (.mkv / .mp4) + subtitles (.srt)
