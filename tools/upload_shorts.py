@@ -36,7 +36,6 @@ TOKEN_FILE = CREDS_DIR / "token.json"
 # 2 uploads/day at these local times:
 SLOT_TIMES = ["12:00", "18:00"]  # HH:MM
 
-
 @dataclass
 class UploadItem:
     path: Path
@@ -79,6 +78,25 @@ def _get_service():
 
     return build("youtube", "v3", credentials=creds)
 
+EXPECTED_HANDLE = "@ladyanimee"   # or channel title if you prefer
+
+def _log_channel_info(youtube):
+    try:
+        resp = youtube.channels().list(
+            part="snippet",
+            mine=True
+        ).execute()
+
+        if not resp.get("items"):
+            print("⚠️ Brand channel detected (mine=true returned empty). Upload will still work.")
+            return
+
+        ch = resp["items"][0]
+        print(f"🔐 OAuth channel: {ch['snippet']['title']}")
+
+    except Exception as e:
+        print("⚠️ Channel verification skipped:", e)
+
 def _verify_channel(youtube):
     resp = youtube.channels().list(
         part="snippet",
@@ -87,12 +105,24 @@ def _verify_channel(youtube):
 
     if not resp.get("items"):
         raise RuntimeError(
-            "❌ OAuth has NO YouTube channel attached.\n"
-            "You are authenticated as a Google user WITHOUT a channel."
+            "❌ OAuth has NO YouTube channel attached."
         )
 
     ch = resp["items"][0]
-    print("✅ OAuth connected to channel:", ch["snippet"]["title"])
+    title = ch["snippet"]["title"]
+    custom_url = ch["snippet"].get("customUrl", "")
+
+    print(f"🔐 OAuth channel detected: {title}")
+
+    if EXPECTED_HANDLE.lower().lstrip("@") not in custom_url.lower():
+        raise RuntimeError(
+            f"❌ WRONG CHANNEL SELECTED.\n"
+            f"Expected: {EXPECTED_HANDLE}\n"
+            f"Got: {title} ({custom_url})\n\n"
+            f"➡ Re-run --auth-only and select the LadyAnime channel."
+        )
+
+    print("✅ OAuth locked to LadyAnime channel.")
 
 def _next_publish_times(today: datetime) -> list[datetime]:
     # schedule for "today" if still in the future, else schedule starting tomorrow
@@ -186,12 +216,6 @@ def main(dry_run: bool = False):
         print("No new shorts to upload.")
         return
 
-    # youtube = _get_service()
-
-    # today = datetime.now()
-    # publish_times = _next_publish_times(today)
-    # items = _build_items(files, publish_times)
-
     today = datetime.now()
     publish_times = _next_publish_times(today)
     items = _build_items(files, publish_times)
@@ -206,7 +230,7 @@ def main(dry_run: bool = False):
         return
 
     youtube = _get_service()
-    _verify_channel(youtube)
+    _log_channel_info(youtube)
 
     # NOTE:
     # publishAt is supported on videos.insert status. :contentReference[oaicite:3]{index=3}
