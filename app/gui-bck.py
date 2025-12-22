@@ -686,242 +686,7 @@ Starting with **Recap Generator**.
                 )
 
             # ======================================================
-            # TAB 4: YouTube Upload
-            # ======================================================
-            with gr.Tab("YouTube Uploads"):
-
-                gr.Markdown(
-                    """
-            ### 📤 LadyAnime Shorts Uploader (Safe Mode)
-
-            ✅ Select videos to upload  
-            ✅ Schedules **2/day at 00:00 + 12:00 (Europe/Zurich)**  
-            ✅ State tracking (no duplicates)  
-            ✅ Atomic saves + retry handling  
-            """
-                )
-
-                # ---- top controls ----
-                with gr.Row():
-                    refresh_btn = gr.Button("🔄 Refresh Lists", variant="secondary")
-                    view_json_btn = gr.Button("📄 View uploaded.json", variant="secondary")
-
-                fresh_until_lbl = gr.Markdown("Fresh-until: (refresh to compute)")
-
-                base_title = gr.Textbox(
-                    label="Base Title (applied to all shorts unless edited per-file)",
-                    placeholder="e.g. Frieren Episode 1 — Best Moments",
-                )
-
-                description_box = gr.Textbox(
-                    label="Default Description",
-                    lines=3,
-                    value="#ladyAnime #anime #Shorts\n",
-                )
-
-                tags_box = gr.Textbox(
-                    label="Tags (comma-separated)",
-                    value="LadyAnime, anime, Shorts",
-                )
-
-                # ---- Pending + Uploaded ----
-                with gr.Row():
-                    pending_df = gr.Dataframe(
-                        headers=["File", "Title (editable)"],
-                        datatype=["str", "str"],
-                        row_count=(1, "dynamic"),
-                        interactive=True,
-                        label="Pending (select via checkbox list below)",
-                    )
-
-                    uploaded_df = gr.Dataframe(
-                        headers=["File", "Title", "publishAt", "video_id"],
-                        datatype=["str", "str", "str", "str"],
-                        row_count=(1, "dynamic"),
-                        interactive=False,
-                        label="Uploaded / Scheduled",
-                    )
-
-                pending_select = gr.CheckboxGroup(label="Select pending shorts to upload", choices=[])
-
-                # with gr.Row():
-                #     upload_selected_btn = gr.Button("🚀 Upload Selected", variant="primary")
-                #     upload_all_btn = gr.Button("📅 Schedule/Upload ALL Remaining", variant="primary")
-                #     dry_run_btn = gr.Button("🧪 Dry Run (Preview Schedule)", variant="secondary")
-
-                with gr.Row():
-                    # Left: safe preview
-                    with gr.Column(scale=1, min_width=160):
-                        dry_run_btn = gr.Button(
-                            "🧪 Dry Run (Preview)",
-                            variant="secondary",
-                        )
-
-                    # Right: upload actions grouped
-                    with gr.Column(scale=2):
-                        with gr.Row():
-                            upload_all_btn = gr.Button(
-                                "📅 Upload ALL Remaining",
-                                variant="secondary",
-                            )
-                            upload_selected_btn = gr.Button(
-                                "🚀 Upload Selected",
-                                variant="primary",
-                                interactive=False,  
-                            )
-                def _toggle_upload_selected(selected):
-                    return gr.update(interactive=bool(selected))
-
-                pending_select.change(
-                    fn=_toggle_upload_selected,
-                    inputs=pending_select,
-                    outputs=upload_selected_btn,
-                )
-
-                uploader_log = gr.Textbox(label="Uploader Log", lines=14, max_lines=20, interactive=False)
-
-                # JSON viewer
-                state_json = gr.JSON(label="uploaded.json (live view)")
-
-                def _refresh_ui():
-                    pending, uploaded_rows, bt = _pending_and_uploaded_tables()
-                    pending_files = [row[0] for row in pending]
-                    fresh = _compute_fresh_until_label(len(pending_files))
-
-                    return (
-                        pending,
-                        uploaded_rows,
-                        gr.update(choices=pending_files, value=[]),
-                        fresh,
-                        bt,
-                    )
-                
-                refresh_btn.click(
-                    fn=_refresh_ui,
-                    outputs=[pending_df, uploaded_df, pending_select, fresh_until_lbl, base_title],
-                )
-
-                def _view_json():
-                    return _read_uploaded_json_pretty()
-
-                view_json_btn.click(fn=_view_json, outputs=state_json)
-
-                # ---- Upload handlers with progress bar support ----
-                def _parse_tags(s: str) -> list[str]:
-                    return [t.strip() for t in (s or "").split(",") if t.strip()]
-                
-                def _collect_per_file_titles(pending_table) -> dict[str, str]:
-                    """
-                    pending_table can be:
-                    - pandas.DataFrame (Gradio Dataframe output)
-                    - list[list[Any]] (sometimes, depending on gradio version)
-                    - None
-                    Returns: {filename: title}
-                    """
-                    out: dict[str, str] = {}
-
-                    if pending_table is None:
-                        return out
-
-                    # If it's a pandas DataFrame
-                    try:
-                        import pandas as pd  # local import is fine
-                        if isinstance(pending_table, pd.DataFrame):
-                            if pending_table.empty:
-                                return out
-                            rows = pending_table.values.tolist()
-                        else:
-                            rows = pending_table
-                    except Exception:
-                        rows = pending_table
-
-                    # If it's still not a list, bail safely
-                    if not isinstance(rows, list):
-                        return out
-
-                    for row in rows:
-                        if not row or len(row) < 1:
-                            continue
-                        filename = str(row[0]).strip() if row[0] is not None else ""
-                        if not filename:
-                            continue
-                        title = ""
-                        if len(row) >= 2 and row[1] is not None:
-                            title = str(row[1]).strip()
-                        out[filename] = title
-
-                    return out
-
-                def _upload(selected, pending_table, bt, desc, tags, schedule_all, dry_run, progress=gr.Progress(track_tqdm=False)):
-                    from tools.upload_shorts import upload_many
-
-                    if (not schedule_all) and (not selected) and (not dry_run):
-                        return "⚠️ No videos selected. Select shorts from the checkbox list first.", *(_refresh_ui()[0:2]), _refresh_ui()[3], _refresh_ui()[4], _read_uploaded_json_pretty()
-
-                    per_file_titles = _collect_per_file_titles(pending_table)
-
-                    def cb(frac: float, msg: str):
-                        # frac is 0..1 for per-file upload; we still show it nicely
-                        progress(frac, desc=msg)
-
-                    res = upload_many(
-                        selected_files=selected if not schedule_all else None,
-                        schedule_all_remaining=schedule_all,
-                        base_title=bt or "",
-                        per_file_titles=per_file_titles,
-                        description=desc or "#ladyAnime #anime #Shorts\n",
-                        tags=_parse_tags(tags),
-                        privacy_status="private",
-                        made_for_kids=False,
-                        dry_run=dry_run,
-                        progress_cb=cb,
-                    )
-
-                    # refresh after upload
-                    pending, uploaded_rows, _, fresh, bt2 = _refresh_ui()
-                    state_view = _read_uploaded_json_pretty()
-
-                    return res["log"], pending, uploaded_rows, fresh, bt2, state_view
-
-                upload_selected_btn.click(
-                    fn=lambda selected, pending_table, bt, desc, tags, progress=gr.Progress(track_tqdm=False):
-                        _upload(selected, pending_table, bt, desc, tags, schedule_all=False, dry_run=False, progress=progress),
-                    inputs=[pending_select, pending_df, base_title, description_box, tags_box],
-                    outputs=[uploader_log, pending_df, uploaded_df, fresh_until_lbl, base_title, state_json],
-                )
-
-                upload_all_btn.click(
-                    fn=lambda pending_table, bt, desc, tags, progress=gr.Progress(track_tqdm=False):
-                        _upload([], pending_table, bt, desc, tags, schedule_all=True, dry_run=False, progress=progress),
-                    inputs=[pending_df, base_title, description_box, tags_box],
-                    outputs=[uploader_log, pending_df, uploaded_df, fresh_until_lbl, base_title, state_json],
-                )
-
-                # dry_run_btn.click(
-                #     fn=lambda selected, pending_table, bt, desc, tags, progress=gr.Progress(track_tqdm=False):
-                #         _upload(selected, pending_table, bt, desc, tags, schedule_all=False, dry_run=True, progress=progress),
-                #     inputs=[pending_select, pending_df, base_title, description_box, tags_box],
-                #     outputs=[uploader_log, pending_df, uploaded_df, fresh_until_lbl, base_title, state_json],
-                # )
-
-                dry_run_btn.click(
-                    fn=lambda selected, pending_table, bt, desc, tags, progress=gr.Progress(track_tqdm=False):
-                        _upload(
-                            selected,
-                            pending_table,
-                            bt,
-                            desc,
-                            tags,
-                            schedule_all=(not selected),   # <--- key line
-                            dry_run=True,
-                            progress=progress,
-                        ),
-                    inputs=[pending_select, pending_df, base_title, description_box, tags_box],
-                    outputs=[uploader_log, pending_df, uploaded_df, fresh_until_lbl, base_title, state_json],
-                )
-
-            # ======================================================
-            # TAB 5: AI Brain
+            # TAB 4: AI Brain
             # ======================================================
             with gr.Tab("AI Brain"):
                 gr.Markdown(
@@ -931,7 +696,63 @@ Starting with **Recap Generator**.
 - Rank best scenes
 - Emotional / epic / viral tuning
 """
-            )
+                )
+
+            # ======================================================
+            # TAB 5: YouTube Upload
+            # ======================================================
+            with gr.Tab("YouTube Uploads"):
+
+                gr.Markdown(
+                    """
+### 📤 Automated YouTube Shorts Uploader
+
+This tool uploads **2 shorts per day** to the **LadyAnime** channel.
+
+• OAuth authenticated ✅  
+• Smart scheduling (12:00 / 18:00)  
+• Upload state tracking  
+• Safe re-runs (no duplicates)  
+"""
+                )
+
+                refresh_btn = gr.Button("🔄 Refresh Shorts Status")
+
+                shorts_table = gr.Dataframe(
+                    headers=["File", "Status"],
+                    datatype=["str", "str"],
+                    interactive=False,
+                    row_count=(1, "dynamic"),
+                )
+
+                refresh_btn.click(
+                    fn=list_shorts_with_status,
+                    outputs=shorts_table,
+                )
+
+                gr.Markdown("---")
+
+                with gr.Row():
+                    upload_now_btn = gr.Button("🚀 Upload Now", variant="primary")
+                    dry_run_btn = gr.Button("🧪 Dry Run (Preview Schedule)")
+
+                uploader_log = gr.Textbox(
+                    label="Uploader Log",
+                    lines=14,
+                    max_lines=20,
+                    interactive=False,
+                )
+
+                upload_now_btn.click(
+                    fn=lambda: run_youtube_uploader(dry_run=False),
+                    outputs=uploader_log,
+                )
+
+                dry_run_btn.click(
+                    fn=lambda: run_youtube_uploader(dry_run=True),
+                    outputs=uploader_log,
+                )
+
     return demo
 
 def main():
