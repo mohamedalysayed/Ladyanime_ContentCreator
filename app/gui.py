@@ -617,7 +617,7 @@ Starting with **Recap Generator**.
                 with gr.Row():
                     run_btn = gr.Button("Generate", variant="primary")
                     stop_btn = gr.Button("🛑 Stop", variant="secondary")
-
+    
                 def _stop_processing():
                     STOP_EVENT.set()
                     return "🛑 Processing stopped by user."
