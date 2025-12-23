@@ -24,6 +24,8 @@ from googleapiclient.errors import HttpError
 # --- CONFIG ---
 SCOPES = ["https://www.googleapis.com/auth/youtube"]
 
+MIN_PUBLISH_LEAD = timedelta(minutes=15)  # must schedule at least 15min in future
+
 ROOT = Path(__file__).resolve().parents[1]
 SHORTS_DIR = ROOT / "data" / "output" / "shorts"
 STATE_FILE = SHORTS_DIR / "uploaded.json"
@@ -190,6 +192,16 @@ def _verify_channel_or_warn(youtube) -> str:
     except Exception as e:
         return f"⚠️ Channel verification skipped: {e}"
 
+def _latest_scheduled_time(state: dict[str, Any]) -> Optional[datetime]:
+    times = []
+    for meta in state.get("uploaded_files", {}).values():
+        ts = meta.get("publish_at")
+        if ts:
+            try:
+                times.append(datetime.fromisoformat(ts))
+            except Exception:
+                pass
+    return max(times) if times else None
 
 # -------------------------
 # Scheduling (2/day, sequential)
@@ -276,38 +288,56 @@ def upload_one(
     made_for_kids: bool,
     progress_cb: Optional[Callable[[float, str], None]] = None,
 ) -> str:
+
+    # ---- HARD SAFETY: publishAt MUST be sufficiently in the future ----
+    now = datetime.now(TZ)
+    min_allowed = now + MIN_PUBLISH_LEAD
+
+    if item.publish_at < min_allowed:
+        raise RuntimeError(
+            f"Invalid publishAt (too soon): "
+            f"{item.publish_at.isoformat()} < {min_allowed.isoformat()}"
+        )
+
+    # ✅ YouTube rule: scheduled uploads MUST be private
+    status = {
+        "privacyStatus": "private",
+        "selfDeclaredMadeForKids": bool(made_for_kids),
+    }
+
+    if item.publish_at:
+        status["publishAt"] = _to_rfc3339(item.publish_at)
+
     body = {
         "snippet": {
             "title": item.title[:95],
             "description": item.description,
             "tags": item.tags,
-            "categoryId": "24",  # Entertainment
+            "categoryId": "24",
         },
-        "status": {
-            "privacyStatus": privacy_status,
-            "publishAt": _to_rfc3339(item.publish_at),
-            "selfDeclaredMadeForKids": bool(made_for_kids),
-        },
+        "status": status,
     }
 
     media = MediaFileUpload(str(item.path), mimetype="video/*", resumable=True)
-    request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+    request = youtube.videos().insert(
+        part="snippet,status",
+        body=body,
+        media_body=media,
+    )
 
     response = None
     last_progress = 0.0
 
     while response is None:
-        status, response = request.next_chunk()
-        if status:
-            frac = float(status.progress())
-            # avoid noisy spam
+        status_upload, response = request.next_chunk()
+        if status_upload:
+            frac = float(status_upload.progress())
             if frac - last_progress >= 0.01:
                 last_progress = frac
                 if progress_cb:
                     progress_cb(frac, f"Uploading {item.path.name} ({int(frac*100)}%)")
 
     return response["id"]
-
 
 def _retryable_upload(
     youtube,
@@ -382,7 +412,6 @@ def build_items(
         )
     return items
 
-
 def upload_many(
     selected_files: Optional[list[str]] = None,
     schedule_all_remaining: bool = False,
@@ -416,7 +445,20 @@ def upload_many(
     if not files:
         return {"ok": True, "log": "No new shorts to upload.", "scheduled_until": None}
 
-    publish_times = build_publish_schedule(len(files))
+    # publish_times = build_publish_schedule(len(files))
+    last_scheduled = _latest_scheduled_time(state)
+
+    now = datetime.now(TZ) + MIN_PUBLISH_LEAD
+    start_from = max(
+        now,
+        last_scheduled + timedelta(minutes=1)
+    ) if last_scheduled else now
+
+    publish_times = build_publish_schedule(
+        len(files),
+        start_from=start_from,
+    )
+
     items = build_items(
         files=files,
         publish_times=publish_times,

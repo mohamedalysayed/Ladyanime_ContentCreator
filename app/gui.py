@@ -13,6 +13,20 @@ from .pipeline import run_mvp, run_shorts, run_rhythmic_recap
 from .segment_matcher import Segment
 from .ffmpeg_tools import overlay_label_to_segments
 
+
+class ProgressController:
+    def __init__(self, progress: gr.Progress, prefix: str = ""):
+        self.progress = progress
+        self.prefix = prefix
+
+    def set(self, frac: float, msg: str):
+        if STOP_EVENT.is_set():
+            raise gr.Error("🛑 Processing stopped by user.")
+        self.progress(max(0.0, min(frac, 1.0)), desc=f"{self.prefix}{msg}")
+
+    def map(self, base: float, span: float, frac: float, msg: str):
+        self.set(base + span * frac, msg)
+
 # ----------------------------------------------------------------------
 # Global stop signal (thread-safe)
 # ----------------------------------------------------------------------
@@ -21,8 +35,20 @@ def guarded_progress_cb(progress, prefix: str = ""):
     def _cb(frac: float, msg: str):
         if STOP_EVENT.is_set():
             raise gr.Error("🛑 Processing stopped by user.")
-        progress(frac, desc=f"{prefix}{msg}")
+        progress_call(progress, frac, f"{prefix}{msg}")
     return _cb
+
+def progress_call(progress_fn, frac: float, msg: str):
+    """
+    Call progress function safely regardless of whether it expects:
+    - progress(frac, desc="...")
+    OR
+    - progress(frac, "...")
+    """
+    try:
+        progress_fn(frac, desc=msg)
+    except TypeError:
+        progress_fn(frac, msg)
 
 # ----------------------------------------------------------------------
 # Helpers
@@ -39,7 +65,6 @@ def _ensure_dirs() -> tuple[Path, Path]:
     input_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     return input_dir, output_dir
-
 
 def _copy_to_inputs(
     video_file: str,
@@ -105,6 +130,27 @@ def get_video_duration(video_path: Path) -> float:
     data = json.loads(result.stdout)
     return float(data["format"]["duration"])
 
+# def render_segments_with_separators(items):
+#     rendered = []
+#     for it in items:
+#         if isinstance(it, str) and it.startswith("__EPISODE__::"):
+#             rendered.append((None, it.replace("__EPISODE__::", "")))
+#         else:
+#             rendered.append(it)
+#     return rendered
+
+def render_segments_with_separators(items):
+    placeholder = str(_project_root() / "data/assets/blank.png")
+    rendered = []
+
+    for it in items:
+        if isinstance(it, str) and it.startswith("__EPISODE__::"):
+            rendered.append((placeholder, it.replace("__EPISODE__::", "")))
+        else:
+            rendered.append(it)
+
+    return rendered
+
 # ----------------------------------------------------------------------
 # Gradio worker with GLOBAL progress bar
 # ----------------------------------------------------------------------
@@ -122,8 +168,12 @@ def run_transcription(
     video: str,
     model: str,
     language: Optional[str],
-    progress=gr.Progress(track_tqdm=False),
+    #progress=gr.Progress(track_tqdm=False),
+    progress=None,
 ):
+    if progress is None:
+        def progress(*args, **kwargs):
+            pass
     input_dir, _ = _ensure_dirs()
 
     video_path = Path(video)
@@ -193,7 +243,8 @@ def _process_single_video(
     video_name = Path(video).stem
     safe_name = video_name.replace(" ", "_")
 
-    progress(0.0, desc=f"📼 Processing {video_name}")
+    #progress(0.0, desc=f"📼 Processing {video_name}")
+    progress_call(progress, 0.0, f"📼 Processing {video_name}")
 
     if STOP_EVENT.is_set():
         raise gr.Error("🛑 Processing stopped by user.")
@@ -251,11 +302,8 @@ def _process_single_video(
     def guarded_progress(i: int, t: int, s: Segment):
         if STOP_EVENT.is_set():
             raise gr.Error("🛑 Processing stopped by user.")
-
-        progress(
-            0.2 + 0.6 * (i / max(t, 1)),
-            desc=f"{video_name}: segment {i}/{t}",
-        )
+        #progress(i / max(t, 1), f"{video_name}: segment {i}/{t}")
+        progress_call(progress, i / max(t, 1), f"{video_name}: segment {i}/{t}")
 
     out_video = run_mvp(
         cfg,
@@ -300,6 +348,9 @@ def _run_recap(
 
     STOP_EVENT.clear()
 
+    pc = ProgressController(progress)
+    pc.set(0.02, "Preparing job…")
+
     if not video or (isinstance(video, list) and len(video) == 0):
         raise gr.Error(
             "🚫 No videos selected.\n\n"
@@ -308,22 +359,66 @@ def _run_recap(
         )
 
     videos = video if isinstance(video, list) else [video]
+    total = len(videos)
+    per_video_span = 0.80 / total   # progress range: 15% → 95%
 
     last_out_video = None
-    last_json = None
     last_segments = []
 
     for idx, v in enumerate(videos, start=1):
 
         if STOP_EVENT.is_set():
             progress(1.0, desc="🛑 Processing stopped")
-            return None, None, []
+            #return None, None, []
+            return None, []
         
-        progress(
-            0.0,
-            desc=f"▶ Processing video {idx}/{len(videos)}: {Path(v).stem}",
+        video_base = 0.15 + (idx - 1) * per_video_span
+        #pc.set(video_base, f"Processing {Path(v).stem}")
+        episode_label = f"S1 · Episode {idx}/{total}"
+        episode_name = Path(v).stem
+
+        pc.set(
+            video_base,
+            f"{episode_label} — {episode_name}"
         )
+
         
+        # cfg, out_video = _process_single_video(
+        #     v,
+        #     subtitles,
+        #     base_output_dir,
+        #     mode,
+        #     intro_skip,
+        #     keep_sec,
+        #     skip_sec,
+        #     concat_final,
+        #     max_block_sec,
+        #     silence_gap_sec,
+        #     min_segment_sec,
+        #     max_segments,
+        #     clean_before_run,
+        #     use_existing,
+        #     add_label,
+        #     video_height,
+        #     progress,
+        # )
+
+        # def on_segment(frac, msg):
+        #     pc.map(
+        #         base=video_base,
+        #         span=per_video_span * 0.85,
+        #         frac=frac,
+        #         msg=msg,
+        #     )
+        
+        def on_segment(frac, msg):
+            pc.map(
+                base=video_base,
+                span=per_video_span * 0.85,
+                frac=frac,
+                msg=f"{episode_label} — {msg}",
+            )
+
         cfg, out_video = _process_single_video(
             v,
             subtitles,
@@ -341,7 +436,7 @@ def _run_recap(
             use_existing,
             add_label,
             video_height,
-            progress,
+            on_segment,
         )
 
         last_out_video = (
@@ -351,11 +446,17 @@ def _run_recap(
         json_path = cfg.output_dir / "segments.json"
         last_json = str(json_path) if json_path.exists() else None
 
-        last_segments = list_videos(cfg.output_dir / "segments")
+        #last_segments = list_videos(cfg.output_dir / "segments")
+        gallery_label = f"🧩 {Path(v).stem}"
+        last_segments.append(f"__EPISODE__::{gallery_label}")
+        last_segments.extend(list_videos(cfg.output_dir / "segments"))
 
-    progress(1.0, desc="✅ All videos processed")
 
-    return last_out_video, last_json, last_segments
+    #progress(1.0, desc="✅ All videos processed")
+    pc.set(1.0, "✅ All videos processed")
+
+    #return last_out_video, last_segments
+    return last_out_video, render_segments_with_separators(last_segments)    
 
 def _run_shorts_ui(
     video: Optional[str],
@@ -364,7 +465,8 @@ def _run_shorts_ui(
     clean_before_run: bool,
     add_label: bool,
     video_height: int,
-    progress=gr.Progress(track_tqdm=False),
+    #progress=gr.Progress(track_tqdm=False),
+    progress=None,
 ):
     if not video:
         raise gr.Error("Please upload a video.")
@@ -482,7 +584,22 @@ def run_youtube_uploader(dry_run: bool = False):
     return "\n".join(output)
 
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="LadyAnime Video Engine") as demo:
+    with gr.Blocks(
+        title="LadyAnime Video Engine",
+        css="""
+        /* Horizontal scrolling gallery for segments */
+        #segments-gallery {
+            overflow-x: auto;
+            white-space: nowrap;
+        }
+
+        #segments-gallery .gallery-item {
+            display: inline-block;
+            width: 240px;
+            margin-right: 10px;
+        }
+        """
+    ) as demo:
         gr.Image(
             value=str(_project_root() / "data" / "assets" / "ladyAnime_banner.jpg"),
             show_label=False,
@@ -493,19 +610,40 @@ def build_ui() -> gr.Blocks:
         # gr.Markdown(
         #     "### 🎬 Automated Recaps & YouTube Shorts Engine",
         # )
-        gr.Markdown(
-            """
-# LadyAnime Video Generation Engine
 
-A multi-mode local tool for:
-- Recaps
-- YouTube Shorts
-- Transcription
-- AI-assisted scene selection
+        with gr.Row():
+            # LEFT COLUMN — Main Engine
+            with gr.Column(scale=3):
+                gr.Markdown(
+                    """
+        # LadyAnime Video Generation Engine
 
-Starting with **Recap Generator**.
-"""
-        )
+        A multi-mode local tool for:
+        - 🎬 **Recaps**
+        - 📱 **YouTube Shorts**
+        - 🎧 **Transcription**
+        - 🤖 **AI-assisted scene selection**
+
+        Starting with **Recap Generator** below ⬇️
+        """
+                )
+
+            # RIGHT COLUMN — Companion Tool
+            with gr.Column(scale=2):
+                gr.Markdown(
+                    """
+        ## AI Companion Tool 
+
+        🧠 **Summaries & Text-to-Speech Generator**
+
+        A lightweight AI assistant for:
+        - Generate summaries
+        - Voice-over generation
+        - Script preparation
+
+        👉 **[Open Tool HERE ↗](https://lady-anime-agent-front-end-vwa5.vercel.app/)**
+        """
+                )
 
         with gr.Tabs():
 
@@ -637,12 +775,19 @@ Starting with **Recap Generator**.
 
                 with gr.Row():
                     out_video = gr.Video(label="Recap Preview")
-                    out_json = gr.File(label="segments.json (debug / AI input)")
+                    #out_json = gr.File(label="segments.json (debug / AI input)")
 
+                # segments_gallery = gr.Gallery(
+                #     label="Generated Segments / Shorts",
+                #     columns=3,
+                #     height=320,
+                #     preview=True,
+                # )
                 segments_gallery = gr.Gallery(
                     label="Generated Segments / Shorts",
-                    columns=3,
-                    height=320,
+                    elem_id="segments-gallery",
+                    columns=999,     # force single row
+                    height=260,
                     preview=True,
                 )
 
@@ -666,7 +811,7 @@ Starting with **Recap Generator**.
                         add_label,
                         video_height,
                     ],
-                    outputs=[out_video, out_json, segments_gallery],
+                    outputs=[out_video, segments_gallery],
                 )
 
             # ======================================================
