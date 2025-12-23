@@ -2,6 +2,8 @@
 # rm -rf ~/.cache/google-auth
 # python3 tools/upload_shorts.py --auth-only
 # python3 tools/upload_shorts.py --rebuild-state
+# secret file path:
+# ladyanime_VidCreator/data/credentials/client_secret.json
 from __future__ import annotations
 
 import argparse
