@@ -9,9 +9,20 @@ import subprocess
 import json
 import gradio as gr
 from .config import AppConfig
-from .pipeline import run_mvp, run_shorts
+from .pipeline import run_mvp, run_shorts, run_rhythmic_recap
 from .segment_matcher import Segment
 from .ffmpeg_tools import overlay_label_to_segments
+
+# ----------------------------------------------------------------------
+# Global stop signal (thread-safe)
+# ----------------------------------------------------------------------
+STOP_EVENT = threading.Event()
+def guarded_progress_cb(progress, prefix: str = ""):
+    def _cb(frac: float, msg: str):
+        if STOP_EVENT.is_set():
+            raise gr.Error("🛑 Processing stopped by user.")
+        progress(frac, desc=f"{prefix}{msg}")
+    return _cb
 
 # ----------------------------------------------------------------------
 # Helpers
@@ -141,6 +152,9 @@ def run_transcription(
     max_wait = duration * 0.9  # realistic cap
 
     while not transcription_done:
+        if STOP_EVENT.is_set():
+            progress(1.0, desc="🛑 Transcription stopped")
+            return None, ""
         elapsed = time.time() - start
         frac = min(elapsed / max_wait, 0.95)
 
@@ -156,9 +170,14 @@ def run_transcription(
 
     return str(srt_path), transcription_text
 
-def _run_recap(
-    video: Optional[str],
+def _process_single_video(
+    video: str,
     subtitles: Optional[str],
+    mode: str,
+    intro_skip: float,
+    keep_sec: float,
+    skip_sec: float,
+    concat_final: bool,
     max_block_sec: float,
     silence_gap_sec: float,
     min_segment_sec: float,
@@ -167,40 +186,48 @@ def _run_recap(
     use_existing: bool,
     add_label: bool,
     video_height: int,
-    progress=gr.Progress(track_tqdm=False),
+    progress,
 ):
+    video_name = Path(video).stem
+    safe_name = video_name.replace(" ", "_")
 
-    """
-    Gradio handler: runs recap pipeline and returns output paths.
-    Shows a single global progress bar.
-    """
-    if not video:
-        raise gr.Error("Please upload an episode video (.mkv / .mp4).")
-    
-    #if mode == "recap" and not subtitles:
-    if not subtitles:    
-        progress(0.07, desc="No subtitles provided — transcribing audio…")
+    progress(0.0, desc=f"📼 Processing {video_name}")
 
-        video_filename, _ = _copy_to_inputs(video, video)  # temp copy
+    if STOP_EVENT.is_set():
+        raise gr.Error("🛑 Processing stopped by user.")
 
-        srt_path = (
-            _project_root()
-            / "data"
-            / "input"
-            / "subtitles.srt"
+    # ---------- rhythmic ----------
+    if mode == "Rhythmic (2s in / 2s out)":
+        video_filename, _ = _copy_to_inputs(video, None)
+
+        cfg = AppConfig(
+            video_filename=video_filename,
+            subtitles_filename=None,
+            max_segments=9999,
+            output_basename="recap",
+            output_subdir=safe_name,
         )
 
-        transcribe_to_srt(
-            video_path=_project_root() / "data" / "input" / video_filename,
-            srt_out=srt_path,
+        out = run_rhythmic_recap(
+            config=cfg,
+            intro_skip_sec=intro_skip,
+            keep_sec=keep_sec,
+            skip_sec=skip_sec,
+            concat=concat_final,
+            progress_cb=guarded_progress_cb(
+                progress,
+                prefix=f"{video_name}: "
+            ),
         )
 
+        return cfg, out
+
+    # ---------- subtitle-based ----------
+    if not subtitles:
+        video_filename, _ = _copy_to_inputs(video, video)
+        srt_path = _project_root() / "data" / "input" / "subtitles.srt"
+        transcribe_to_srt(_project_root() / "data" / "input" / video_filename, srt_path)
         subtitles = str(srt_path)
-
-    # ------------------------------------------------------------
-    # Stage 1: Preparation (0–10%)
-    # ------------------------------------------------------------
-    progress(0.05, desc="Preparing files…")
 
     video_filename, srt_filename = _copy_to_inputs(video, subtitles)
 
@@ -209,119 +236,123 @@ def _run_recap(
         subtitles_filename=srt_filename,
         max_segments=int(max_segments),
         output_basename="recap",
+        output_subdir=safe_name,
     )
 
     if clean_before_run:
         clean_output_dir(cfg.output_dir)
 
-    existing_segments = detect_existing_segments(cfg.output_dir)
-    active_segment_files: list[Path] = []
-    progress(0.12, desc="Analyzing subtitles & building segments…")
-
-    def on_progress(i: int, total: int, seg: Segment):
-        base = 0.25
-        span = 0.65
-        frac = base + span * (i / max(total, 1))
+    def guarded_progress(i: int, t: int, s: Segment):
+        if STOP_EVENT.is_set():
+            raise gr.Error("🛑 Processing stopped by user.")
 
         progress(
-            frac,
-            desc=f"Creating segment {i} / {total}  ({seg.start_s:.1f}s → {seg.end_s:.1f}s)",
+            0.2 + 0.6 * (i / max(t, 1)),
+            desc=f"{video_name}: segment {i}/{t}",
         )
 
-    # ------------------------------------------------------------
-    # Stage 2: Run pipeline
-    # ------------------------------------------------------------
-    if use_existing and existing_segments:
-        active_segment_files = existing_segments
-        out_video = cfg.output_dir / "recap.mp4"
+    # out_video = run_mvp(
+    #     cfg,
+    #     progress_cb=lambda i, t, s: progress(
+    #         0.2 + 0.6 * (i / max(t, 1)),
+    #         desc=f"{video_name}: segment {i}/{t}",
+    #     ),
+    #     progress_cb=guarded_progress,
+    #     max_block_sec=max_block_sec,
+    #     silence_gap_sec=silence_gap_sec,
+    #     min_segment_sec=min_segment_sec,
+    # )
+    out_video = run_mvp(
+        cfg,
+        progress_cb=guarded_progress,
+        max_block_sec=max_block_sec,
+        silence_gap_sec=silence_gap_sec,
+        min_segment_sec=min_segment_sec,
+    )
 
-        progress(0.20, desc=f"Using {len(active_segment_files)} existing segments")
+    if add_label and out_video:
+        from .ffmpeg_tools import overlay_label
+        labeled = cfg.output_dir / "recap_labeled.mp4"
+        overlay_label(out_video, _project_root() / "data/shorts_label/shortsLabel_LA.mp4", labeled, video_height)
+        out_video = labeled
 
-    else:
-        progress(0.15, desc="Generating segments…")
+    return cfg, out_video
 
-        out_video = run_mvp(
-            cfg,
-            progress_cb=on_progress,
-            max_block_sec=max_block_sec,
-            silence_gap_sec=silence_gap_sec,
-            min_segment_sec=min_segment_sec,
+def _run_recap(
+    video,
+    subtitles,
+    mode,
+    intro_skip,
+    keep_sec,
+    skip_sec,
+    concat_final,
+    max_block_sec,
+    silence_gap_sec,
+    min_segment_sec,
+    max_segments,
+    clean_before_run,
+    use_existing,
+    add_label,
+    video_height,
+    progress=gr.Progress(track_tqdm=False),
+):
+    STOP_EVENT.clear()
+
+    if not video or (isinstance(video, list) and len(video) == 0):
+        raise gr.Error(
+            "🚫 No videos selected.\n\n"
+            "Please upload one or more episode videos (.mp4 or .mkv) "
+            "before clicking **Generate Recap**."
         )
 
-        active_segment_files = detect_existing_segments(cfg.output_dir)
+    videos = video if isinstance(video, list) else [video]
 
-        #if mode == "recap" and add_label and active_segment_files:
-        if add_label and active_segment_files:
-            label_path = (
-                _project_root()
-                / "data"
-                / "shorts_label"
-                / "shortsLabel_LA.mp4"
-            )
+    last_out_video = None
+    last_json = None
+    last_segments = []
 
-            labeled_dir = cfg.output_dir / "segments_labeled"
-            labeled_dir.mkdir(exist_ok=True)
+    for idx, v in enumerate(videos, start=1):
 
-            progress(0.75, desc="Applying LadyAnime label to segments…")
+        if STOP_EVENT.is_set():
+            progress(1.0, desc="🛑 Processing stopped")
+            return None, None, []
+        
+        progress(
+            0.0,
+            desc=f"▶ Processing video {idx}/{len(videos)}: {Path(v).stem}",
+        )
+        
+        cfg, out_video = _process_single_video(
+            v,
+            subtitles,
+            mode,
+            intro_skip,
+            keep_sec,
+            skip_sec,
+            concat_final,
+            max_block_sec,
+            silence_gap_sec,
+            min_segment_sec,
+            max_segments,
+            clean_before_run,
+            use_existing,
+            add_label,
+            video_height,
+            progress,
+        )
 
-            labeled_dir = cfg.output_dir / "segments_labeled"
-            labeled_dir.mkdir(exist_ok=True)
+        last_out_video = (
+            str(out_video) if out_video and Path(out_video).is_file() else None
+        )
 
-            progress(0.75, desc="Applying LadyAnime label to segments…")
+        json_path = cfg.output_dir / "segments.json"
+        last_json = str(json_path) if json_path.exists() else None
 
-            labeled_segments = overlay_label_to_segments(
-                segment_files=detect_existing_segments(cfg.output_dir),
-                label_mp4=(
-                    _project_root()
-                    / "data"
-                    / "shorts_label"
-                    / "shortsLabel_LA.mp4"
-                ),
-                out_dir=labeled_dir,
-                video_height=video_height,
-            )
+        last_segments = list_videos(cfg.output_dir / "segments")
 
-            # REPLACE original segments with labeled ones
-            for f in (cfg.output_dir / "segments").glob("seg_*.mp4"):
-                f.unlink()
+    progress(1.0, desc="✅ All videos processed")
 
-            for f in labeled_segments:
-                f.rename(cfg.output_dir / "segments" / f.name)
-
-        # Apply label ONLY for recap (shorts already handled in run_shorts)
-        if add_label:
-        #if add_label and mode == "recap":
-            from .ffmpeg_tools import overlay_label
-
-            labeled_out = cfg.output_dir / "recap_labeled.mp4"
-
-            overlay_label(
-                video_in=Path(out_video),
-                label_mp4=(
-                    _project_root()
-                    / "data"
-                    / "shorts_label"
-                    / "shortsLabel_LA.mp4"
-                ),
-                video_out=labeled_out,
-                video_height=video_height,
-            )
-
-            out_video = labeled_out
-
-    # ------------------------------------------------------------
-    # Stage 3: Finalization (90–100%)
-    # ------------------------------------------------------------
-    progress(0.95, desc="Finalizing recap…")
-
-    segments_json = cfg.output_dir / "segments.json"
-
-    progress(1.0, desc="Done ✔")
-
-    segments_dir = cfg.output_dir / "segments"
-    segment_videos = list_videos(segments_dir)
-
-    return str(out_video), str(segments_json), segment_videos
+    return last_out_video, last_json, last_segments
 
 def _run_shorts_ui(
     video: Optional[str],
@@ -480,17 +511,59 @@ Starting with **Recap Generator**.
             # ======================================================
             with gr.Tab("Recap Generator"):
 
+                mode = gr.Radio(
+                    ["Subtitle-based", "Rhythmic (2s in / 2s out)"],
+                    value="Subtitle-based",
+                    label="Recap Mode",
+                )
+
                 with gr.Row():
+                    # video_in = gr.File(
+                    #     label="Episode video (.mkv / .mp4)",
+                    #     file_count="single",
+                    # )
                     video_in = gr.File(
-                        label="Episode video (.mkv / .mp4)",
-                        file_count="single",
+                        label="Episode videos (.mkv / .mp4)",
+                        file_count="multiple",
                     )
                     srt_in = gr.File(
                         label="Subtitles (.srt)",
                         file_count="single",
                     )
 
-                with gr.Accordion("Segment Settings", open=True):
+                def _toggle_recap_mode(selected_mode):
+                    is_subtitle = selected_mode == "Subtitle-based"
+                    is_rhythmic = not is_subtitle
+
+                    return (
+                        gr.update(visible=is_subtitle),   # srt_in
+                        gr.update(visible=is_rhythmic),   # rhythmic accordion
+                        gr.update(visible=is_subtitle),   # subtitle accordion
+                    )
+
+                with gr.Accordion("Rhythmic Recap Settings", open=False, visible=False) as rhythmic_accordion:
+                    intro_skip = gr.Slider(
+                        0, 300, value=90, step=1,
+                        label="Intro skip (seconds)",
+                        info="Skip opening / recap / OP",
+                    )
+
+                    keep_sec = gr.Slider(
+                        0.5, 10, value=2, step=0.5,
+                        label="Keep duration (seconds)",
+                    )
+
+                    skip_sec = gr.Slider(
+                        0.5, 10, value=2, step=0.5,
+                        label="Skip duration (seconds)",
+                    )
+
+                    concat_final = gr.Checkbox(
+                        label="Concatenate segments into final recap video",
+                        value=True,
+                    )
+
+                with gr.Accordion("Segment Settings", open=True) as subtitle_controls:
                     max_block = gr.Slider(
                         10, 120, value=20, step=1,
                         label="Target segment length (sec)",
@@ -531,7 +604,28 @@ Starting with **Recap Generator**.
                         info="Lower = more LadyAnime label visible (top & bottom)",
                     )
 
-                run_btn = gr.Button("Generate Recap", variant="primary")
+                mode.change(
+                    fn=_toggle_recap_mode,
+                    inputs=mode,
+                    outputs=[
+                        srt_in,
+                        rhythmic_accordion,
+                        subtitle_controls,
+                    ],
+                )
+
+                with gr.Row():
+                    run_btn = gr.Button("Generate", variant="primary")
+                    stop_btn = gr.Button("🛑 Stop", variant="secondary")
+
+                def _stop_processing():
+                    STOP_EVENT.set()
+                    return "🛑 Processing stopped by user."
+
+                stop_btn.click(
+                    fn=_stop_processing,
+                    outputs=[],
+                )
 
                 with gr.Row():
                     out_video = gr.Video(label="Recap Preview")
@@ -544,9 +638,30 @@ Starting with **Recap Generator**.
                     preview=True,
                 )
 
+                # run_btn.click(
+                #     fn=_run_recap,
+                #     inputs=[video_in, srt_in, max_block, silence_gap, min_seg, max_segs, clean_before_run, use_existing, add_label, video_height],
+                #     outputs=[out_video, out_json, segments_gallery],
+                # )
                 run_btn.click(
                     fn=_run_recap,
-                    inputs=[video_in, srt_in, max_block, silence_gap, min_seg, max_segs, clean_before_run, use_existing, add_label, video_height],
+                    inputs=[
+                        video_in,
+                        srt_in,
+                        mode,
+                        intro_skip,
+                        keep_sec,
+                        skip_sec,
+                        concat_final,
+                        max_block,
+                        silence_gap,
+                        min_seg,
+                        max_segs,
+                        clean_before_run,
+                        use_existing,
+                        add_label,
+                        video_height,
+                    ],
                     outputs=[out_video, out_json, segments_gallery],
                 )
 

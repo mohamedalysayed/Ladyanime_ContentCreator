@@ -14,9 +14,9 @@ import math
 import subprocess
 # from typing import List
 from .ffmpeg_tools import overlay_label
+from .ffmpeg_tools import rhythmic_cut
 
 console = Console()
-
 
 def run_mvp(
     config: AppConfig,
@@ -147,6 +147,37 @@ def run_mvp(
 
     console.print(f"[bold green]DONE[/bold green] → {out_video}")
 
+    return out_video
+
+def run_rhythmic_recap(
+    config: AppConfig,
+    intro_skip_sec: float,
+    keep_sec: float,
+    skip_sec: float,
+    concat: bool,
+    progress_cb=None,
+) -> Path | None:
+
+    seg_dir = config.output_dir / "segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+
+    segments = rhythmic_cut(
+        video_path=config.video_path,
+        out_dir=seg_dir,
+        start_offset=intro_skip_sec,
+        keep_sec=keep_sec,
+        skip_sec=skip_sec,
+        progress_cb=progress_cb,
+    )
+
+    if not segments:
+        raise RuntimeError("No rhythmic segments produced.")
+
+    if not concat:
+        return None
+
+    out_video = config.output_dir / "recap.mp4"
+    concat_segments(segments, out_video)
     return out_video
 
 def run_shorts(

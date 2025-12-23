@@ -27,6 +27,61 @@ def _run(cmd: List[str]) -> None:
             console.print(proc.stderr)
         raise RuntimeError(f"Command failed with exit code {proc.returncode}")
 
+def rhythmic_cut(
+    video_path: Path,
+    out_dir: Path,
+    start_offset: float,
+    keep_sec: float,
+    skip_sec: float,
+    progress_cb=None,
+) -> list[Path]:
+    """
+    Cuts video in rhythmic fashion:
+    keep X sec, skip Y sec, repeat.
+    """
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Probe duration
+    probe_cmd = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(video_path),
+    ]
+    duration = float(subprocess.check_output(probe_cmd).decode().strip())
+
+    t = start_offset
+    idx = 1
+    outputs: list[Path] = []
+
+    while t + keep_sec <= duration:
+        out_path = out_dir / f"seg_{idx:03d}.mp4"
+
+        if progress_cb:
+            progress_cb(t / duration, f"Cutting segment {idx}")
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{t:.3f}",
+            "-t", f"{keep_sec:.3f}",
+            "-i", str(video_path),
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            str(out_path),
+        ]
+
+        subprocess.run(cmd, check=True)
+        outputs.append(out_path)
+
+        t += keep_sec + skip_sec
+        idx += 1
+
+    return outputs
 
 def write_segments_json(path: Path, segments: List[Segment]) -> None:
     payload = [asdict(s) for s in segments]
