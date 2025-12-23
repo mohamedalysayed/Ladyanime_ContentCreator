@@ -432,6 +432,7 @@ def upload_many(
             lines.append(f"{it.path.name}")
             lines.append(f"  → scheduled at {it.publish_at.isoformat(timespec='minutes')}")
             lines.append(f"  → title: {it.title}")
+            lines.append(f"  → privacy: {privacy_status}")
             lines.append("")
         return {"ok": True, "log": "\n".join(lines), "scheduled_until": scheduled_until.isoformat()}
 
@@ -444,20 +445,51 @@ def upload_many(
         if progress_cb:
             progress_cb(0.0, f"[{idx}/{len(items)}] Starting {item.path.name}…")
 
-        vid = _retryable_upload(
-            youtube=youtube,
-            item=item,
-            privacy_status=privacy_status,
-            made_for_kids=made_for_kids,
-            progress_cb=progress_cb,
-        )
+        # vid = _retryable_upload(
+        #     youtube=youtube,
+        #     item=item,
+        #     privacy_status=privacy_status,
+        #     made_for_kids=made_for_kids,
+        #     progress_cb=progress_cb,
+        # )
 
+        try:
+            vid = _retryable_upload(
+                youtube=youtube,
+                item=item,
+                privacy_status=privacy_status,
+                made_for_kids=made_for_kids,
+                progress_cb=progress_cb,
+            )
+        except HttpError as e:
+            reason = str(e)
+            if "quotaExceeded" in reason:
+                lines.append("⛔ YouTube API quota exceeded.")
+                lines.append("⏸ Upload paused safely.")
+                lines.append("▶ Resume tomorrow — remaining shorts are preserved.")
+                _save_state(state)
+                return {
+                    "ok": False,
+                    "log": "\n".join(lines),
+                    "scheduled_until": None,
+                    "quota_exceeded": True,
+                }
+            raise
+
+        # state["uploaded_files"][item.path.name] = {
+        #     "video_id": vid,
+        #     "publish_at": _to_rfc3339(item.publish_at),
+        #     "uploaded_at": datetime.now(TZ).isoformat(timespec="seconds"),
+        #     "title": item.title,
+        # }
         state["uploaded_files"][item.path.name] = {
             "video_id": vid,
             "publish_at": _to_rfc3339(item.publish_at),
             "uploaded_at": datetime.now(TZ).isoformat(timespec="seconds"),
             "title": item.title,
+            "privacy": privacy_status,
         }
+
 
         lines.append(f"✅ Uploaded: {item.path.name} → {vid} (publishAt {state['uploaded_files'][item.path.name]['publish_at']})")
 

@@ -724,6 +724,16 @@ Starting with **Recap Generator**.
                     value="LadyAnime, anime, Shorts",
                 )
 
+                privacy_box = gr.Radio(
+                    ["private", "unlisted", "public"],
+                    value="public",
+                    label="Video Privacy",
+                )
+
+                gr.Markdown(
+                    "⚠️ Recommendation: You can also keep uploads **Private** and switch to Public after review."
+                )
+
                 # ---- Pending + Uploaded ----
                 with gr.Row():
                     pending_df = gr.Dataframe(
@@ -743,11 +753,6 @@ Starting with **Recap Generator**.
                     )
 
                 pending_select = gr.CheckboxGroup(label="Select pending shorts to upload", choices=[])
-
-                # with gr.Row():
-                #     upload_selected_btn = gr.Button("🚀 Upload Selected", variant="primary")
-                #     upload_all_btn = gr.Button("📅 Schedule/Upload ALL Remaining", variant="primary")
-                #     dry_run_btn = gr.Button("🧪 Dry Run (Preview Schedule)", variant="secondary")
 
                 with gr.Row():
                     # Left: safe preview
@@ -852,7 +857,8 @@ Starting with **Recap Generator**.
 
                     return out
 
-                def _upload(selected, pending_table, bt, desc, tags, schedule_all, dry_run, progress=gr.Progress(track_tqdm=False)):
+                def _upload(selected, pending_table, bt, desc, tags, privacy, schedule_all, dry_run, progress=gr.Progress(track_tqdm=False)):
+
                     from tools.upload_shorts import upload_many
 
                     if (not schedule_all) and (not selected) and (not dry_run):
@@ -861,8 +867,9 @@ Starting with **Recap Generator**.
                     per_file_titles = _collect_per_file_titles(pending_table)
 
                     def cb(frac: float, msg: str):
-                        # frac is 0..1 for per-file upload; we still show it nicely
-                        progress(frac, desc=msg)
+                        # smooth progress illusion
+                        visual_frac = 0.1 + 0.8 * frac
+                        progress(visual_frac, desc=msg)
 
                     res = upload_many(
                         selected_files=selected if not schedule_all else None,
@@ -871,7 +878,7 @@ Starting with **Recap Generator**.
                         per_file_titles=per_file_titles,
                         description=desc or "#ladyAnime #anime #Shorts\n",
                         tags=_parse_tags(tags),
-                        privacy_status="private",
+                        privacy_status=privacy,
                         made_for_kids=False,
                         dry_run=dry_run,
                         progress_cb=cb,
@@ -882,41 +889,58 @@ Starting with **Recap Generator**.
                     state_view = _read_uploaded_json_pretty()
 
                     return res["log"], pending, uploaded_rows, fresh, bt2, state_view
+                
+                
+                def dry_run_handler(selected, pending_table, bt, desc, tags, privacy, progress=gr.Progress(track_tqdm=False)):
+                    return _upload(
+                        selected=selected,
+                        pending_table=pending_table,
+                        bt=bt,
+                        desc=desc,
+                        tags=tags,
+                        privacy=privacy,
+                        schedule_all=(not selected),
+                        dry_run=True,
+                        progress=progress,
+                    )
 
                 upload_selected_btn.click(
-                    fn=lambda selected, pending_table, bt, desc, tags, progress=gr.Progress(track_tqdm=False):
-                        _upload(selected, pending_table, bt, desc, tags, schedule_all=False, dry_run=False, progress=progress),
-                    inputs=[pending_select, pending_df, base_title, description_box, tags_box],
-                    outputs=[uploader_log, pending_df, uploaded_df, fresh_until_lbl, base_title, state_json],
-                )
-
-                upload_all_btn.click(
-                    fn=lambda pending_table, bt, desc, tags, progress=gr.Progress(track_tqdm=False):
-                        _upload([], pending_table, bt, desc, tags, schedule_all=True, dry_run=False, progress=progress),
-                    inputs=[pending_df, base_title, description_box, tags_box],
-                    outputs=[uploader_log, pending_df, uploaded_df, fresh_until_lbl, base_title, state_json],
-                )
-
-                # dry_run_btn.click(
-                #     fn=lambda selected, pending_table, bt, desc, tags, progress=gr.Progress(track_tqdm=False):
-                #         _upload(selected, pending_table, bt, desc, tags, schedule_all=False, dry_run=True, progress=progress),
-                #     inputs=[pending_select, pending_df, base_title, description_box, tags_box],
-                #     outputs=[uploader_log, pending_df, uploaded_df, fresh_until_lbl, base_title, state_json],
-                # )
-
-                dry_run_btn.click(
-                    fn=lambda selected, pending_table, bt, desc, tags, progress=gr.Progress(track_tqdm=False):
+                    fn=lambda selected, pending_table, bt, desc, tags, privacy, progress=gr.Progress(track_tqdm=False):
                         _upload(
                             selected,
                             pending_table,
                             bt,
                             desc,
                             tags,
-                            schedule_all=(not selected),   # <--- key line
-                            dry_run=True,
+                            privacy,
+                            schedule_all=False,
+                            dry_run=False,
                             progress=progress,
                         ),
-                    inputs=[pending_select, pending_df, base_title, description_box, tags_box],
+                    inputs=[pending_select, pending_df, base_title, description_box, tags_box, privacy_box],
+                    outputs=[uploader_log, pending_df, uploaded_df, fresh_until_lbl, base_title, state_json],
+                )
+
+                upload_all_btn.click(
+                    fn=lambda pending_table, bt, desc, tags, privacy, progress=gr.Progress(track_tqdm=False):
+                        _upload(
+                            [],
+                            pending_table,
+                            bt,
+                            desc,
+                            tags,
+                            privacy,
+                            schedule_all=True,
+                            dry_run=False,
+                            progress=progress,
+                        ),
+                    inputs=[pending_df, base_title, description_box, tags_box, privacy_box],
+                    outputs=[uploader_log, pending_df, uploaded_df, fresh_until_lbl, base_title, state_json],
+                )
+
+                dry_run_btn.click(
+                    fn=dry_run_handler,
+                    inputs=[pending_select, pending_df, base_title, description_box, tags_box, privacy_box],
                     outputs=[uploader_log, pending_df, uploaded_df, fresh_until_lbl, base_title, state_json],
                 )
 
