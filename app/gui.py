@@ -173,6 +173,7 @@ def run_transcription(
 def _process_single_video(
     video: str,
     subtitles: Optional[str],
+    base_output_dir: Path,
     mode: str,
     intro_skip: float,
     keep_sec: float,
@@ -188,6 +189,7 @@ def _process_single_video(
     video_height: int,
     progress,
 ):
+
     video_name = Path(video).stem
     safe_name = video_name.replace(" ", "_")
 
@@ -224,9 +226,12 @@ def _process_single_video(
 
     # ---------- subtitle-based ----------
     if not subtitles:
-        video_filename, _ = _copy_to_inputs(video, video)
+        video_filename, _ = _copy_to_inputs(video, None)
         srt_path = _project_root() / "data" / "input" / "subtitles.srt"
-        transcribe_to_srt(_project_root() / "data" / "input" / video_filename, srt_path)
+        transcribe_to_srt(
+            video_path=_project_root() / "data" / "input" / video_filename,
+            srt_out=srt_path,
+        )
         subtitles = str(srt_path)
 
     video_filename, srt_filename = _copy_to_inputs(video, subtitles)
@@ -237,6 +242,7 @@ def _process_single_video(
         max_segments=int(max_segments),
         output_basename="recap",
         output_subdir=safe_name,
+        output_root=base_output_dir,   # 👈 NEW
     )
 
     if clean_before_run:
@@ -251,17 +257,6 @@ def _process_single_video(
             desc=f"{video_name}: segment {i}/{t}",
         )
 
-    # out_video = run_mvp(
-    #     cfg,
-    #     progress_cb=lambda i, t, s: progress(
-    #         0.2 + 0.6 * (i / max(t, 1)),
-    #         desc=f"{video_name}: segment {i}/{t}",
-    #     ),
-    #     progress_cb=guarded_progress,
-    #     max_block_sec=max_block_sec,
-    #     silence_gap_sec=silence_gap_sec,
-    #     min_segment_sec=min_segment_sec,
-    # )
     out_video = run_mvp(
         cfg,
         progress_cb=guarded_progress,
@@ -281,6 +276,7 @@ def _process_single_video(
 def _run_recap(
     video,
     subtitles,
+    output_dir,
     mode,
     intro_skip,
     keep_sec,
@@ -296,6 +292,12 @@ def _run_recap(
     video_height,
     progress=gr.Progress(track_tqdm=False),
 ):
+    from pathlib import Path
+    if output_dir:
+        base_output_dir = Path(output_dir)
+    else:
+        base_output_dir = _project_root() / "data" / "output"
+
     STOP_EVENT.clear()
 
     if not video or (isinstance(video, list) and len(video) == 0):
@@ -325,6 +327,7 @@ def _run_recap(
         cfg, out_video = _process_single_video(
             v,
             subtitles,
+            base_output_dir,
             mode,
             intro_skip,
             keep_sec,
@@ -614,6 +617,11 @@ Starting with **Recap Generator**.
                     ],
                 )
 
+                output_dir_picker = gr.Textbox(
+                    label="Output folder (optional)",
+                    placeholder="Leave empty to use default: data/output",
+                )
+
                 with gr.Row():
                     run_btn = gr.Button("Generate", variant="primary")
                     stop_btn = gr.Button("🛑 Stop", variant="secondary")
@@ -638,16 +646,12 @@ Starting with **Recap Generator**.
                     preview=True,
                 )
 
-                # run_btn.click(
-                #     fn=_run_recap,
-                #     inputs=[video_in, srt_in, max_block, silence_gap, min_seg, max_segs, clean_before_run, use_existing, add_label, video_height],
-                #     outputs=[out_video, out_json, segments_gallery],
-                # )
                 run_btn.click(
                     fn=_run_recap,
                     inputs=[
                         video_in,
                         srt_in,
+                        output_dir_picker,
                         mode,
                         intro_skip,
                         keep_sec,
@@ -664,14 +668,6 @@ Starting with **Recap Generator**.
                     ],
                     outputs=[out_video, out_json, segments_gallery],
                 )
-
-#                 gr.Markdown(
-#                     """
-# **Tip:**  
-# Language does not matter (Spanish, Japanese, etc).  
-# Segmentation is based on timestamps and silence gaps.
-# """
-#                )
 
             # ======================================================
             # TAB 2: YouTube Shorts
@@ -739,7 +735,6 @@ Starting with **Recap Generator**.
                         shorts_gallery,
                     ],
                 )
-
 
             # ======================================================
             # TAB 3: Transcription
@@ -809,7 +804,7 @@ Starting with **Recap Generator**.
                     """
             ### 📤 LadyAnime Shorts Uploader (Safe Mode)
 
-            ✅ Select videos to upload  
+            ✅ It allows your to select videos to upload  
             ✅ Schedules **2/day at 00:00 + 12:00 (Europe/Zurich)**  
             ✅ State tracking (no duplicates)  
             ✅ Atomic saves + retry handling  
