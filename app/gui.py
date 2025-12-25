@@ -130,15 +130,6 @@ def get_video_duration(video_path: Path) -> float:
     data = json.loads(result.stdout)
     return float(data["format"]["duration"])
 
-# def render_segments_with_separators(items):
-#     rendered = []
-#     for it in items:
-#         if isinstance(it, str) and it.startswith("__EPISODE__::"):
-#             rendered.append((None, it.replace("__EPISODE__::", "")))
-#         else:
-#             rendered.append(it)
-#     return rendered
-
 def render_segments_with_separators(items):
     placeholder = str(_project_root() / "data/assets/blank.png")
     rendered = []
@@ -150,6 +141,46 @@ def render_segments_with_separators(items):
             rendered.append(it)
 
     return rendered
+
+def concat_videos_ffmpeg(videos: list[Path], output: Path):
+    txt = output.parent / "concat_list.txt"
+    with txt.open("w") as f:
+        for v in videos:
+            f.write(f"file '{v.as_posix()}'\n")
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", str(txt),
+        "-map", "0:v:0",
+        "-map", "0:a?",
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "18",
+        "-c:a", "aac",
+        "-movflags", "+faststart",
+        str(output),
+    ]
+    subprocess.run(cmd, check=True)
+
+def speed_up_video(input_v: Path, factor: float) -> Path:
+    if factor == 1.0:
+        return input_v
+
+    out = input_v.with_name(input_v.stem + f"_x{factor}.mp4")
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(input_v),
+        "-filter_complex",
+        f"[0:v]setpts={1/factor}*PTS[v];[0:a]atempo={factor}[a]",
+        "-map", "[v]",
+        "-map", "[a]",
+        str(out),
+    ]
+    subprocess.run(cmd, check=True)
+    return out
 
 # ----------------------------------------------------------------------
 # Gradio worker with GLOBAL progress bar
@@ -229,6 +260,7 @@ def _process_single_video(
     keep_sec: float,
     skip_sec: float,
     concat_final: bool,
+    speed_factor: float, 
     max_block_sec: float,
     silence_gap_sec: float,
     min_segment_sec: float,
@@ -253,25 +285,47 @@ def _process_single_video(
     if mode == "Rhythmic (2s in / 2s out)":
         video_filename, _ = _copy_to_inputs(video, None)
 
+        # cfg = AppConfig(
+        #     video_filename=video_filename,
+        #     subtitles_filename=None,
+        #     max_segments=9999,
+        #     output_basename="recap",
+        #     output_subdir=safe_name,
+        # )
+
         cfg = AppConfig(
             video_filename=video_filename,
             subtitles_filename=None,
             max_segments=9999,
-            output_basename="recap",
+            output_basename=f"{safe_name}_recap",
             output_subdir=safe_name,
         )
+
+        # out = run_rhythmic_recap(
+        #     config=cfg,
+        #     intro_skip_sec=intro_skip,
+        #     keep_sec=keep_sec,
+        #     skip_sec=skip_sec,
+        #     concat=concat_final,
+        #     progress_cb=guarded_progress_cb(
+        #         progress,
+        #         prefix=f"{video_name}: "
+        #     ),
+        # )
 
         out = run_rhythmic_recap(
             config=cfg,
             intro_skip_sec=intro_skip,
             keep_sec=keep_sec,
             skip_sec=skip_sec,
+            speed_factor=speed_factor,   # 👈 NEW
             concat=concat_final,
             progress_cb=guarded_progress_cb(
                 progress,
                 prefix=f"{video_name}: "
             ),
         )
+
 
         return cfg, out
 
@@ -287,13 +341,22 @@ def _process_single_video(
 
     video_filename, srt_filename = _copy_to_inputs(video, subtitles)
 
+    # cfg = AppConfig(
+    #     video_filename=video_filename,
+    #     subtitles_filename=srt_filename,
+    #     max_segments=int(max_segments),
+    #     output_basename="recap",
+    #     output_subdir=safe_name,
+    #     output_root=base_output_dir,   # 👈 NEW
+    # )
+
     cfg = AppConfig(
         video_filename=video_filename,
         subtitles_filename=srt_filename,
         max_segments=int(max_segments),
-        output_basename="recap",
+        output_basename=f"{safe_name}_recap",
         output_subdir=safe_name,
-        output_root=base_output_dir,   # 👈 NEW
+        output_root=base_output_dir,
     )
 
     if clean_before_run:
@@ -304,6 +367,24 @@ def _process_single_video(
             raise gr.Error("🛑 Processing stopped by user.")
         #progress(i / max(t, 1), f"{video_name}: segment {i}/{t}")
         progress_call(progress, i / max(t, 1), f"{video_name}: segment {i}/{t}")
+
+    # Reuse existing segments if requested
+    if use_existing:
+        existing = detect_existing_segments(cfg.output_dir)
+        if existing:
+            progress_call(
+                progress,
+                0.05,
+                f"{video_name}: using existing {len(existing)} segments",
+            )
+
+            # If concat_final → reuse existing recap if available
+            recap = cfg.output_dir / f"{cfg.output_basename}.mp4"
+            if recap.exists():
+                return cfg, recap
+
+            # Otherwise, just reuse segments (viewer still works)
+            return cfg, None
 
     out_video = run_mvp(
         cfg,
@@ -330,6 +411,8 @@ def _run_recap(
     keep_sec,
     skip_sec,
     concat_final,
+    agglomerate_season,
+    speed_factor, 
     max_block_sec,
     silence_gap_sec,
     min_segment_sec,
@@ -345,6 +428,8 @@ def _run_recap(
         base_output_dir = Path(output_dir)
     else:
         base_output_dir = _project_root() / "data" / "output"
+
+    all_recaps = []
 
     STOP_EVENT.clear()
 
@@ -381,35 +466,6 @@ def _run_recap(
             video_base,
             f"{episode_label} — {episode_name}"
         )
-
-        
-        # cfg, out_video = _process_single_video(
-        #     v,
-        #     subtitles,
-        #     base_output_dir,
-        #     mode,
-        #     intro_skip,
-        #     keep_sec,
-        #     skip_sec,
-        #     concat_final,
-        #     max_block_sec,
-        #     silence_gap_sec,
-        #     min_segment_sec,
-        #     max_segments,
-        #     clean_before_run,
-        #     use_existing,
-        #     add_label,
-        #     video_height,
-        #     progress,
-        # )
-
-        # def on_segment(frac, msg):
-        #     pc.map(
-        #         base=video_base,
-        #         span=per_video_span * 0.85,
-        #         frac=frac,
-        #         msg=msg,
-        #     )
         
         def on_segment(frac, msg):
             pc.map(
@@ -428,6 +484,7 @@ def _run_recap(
             keep_sec,
             skip_sec,
             concat_final,
+            speed_factor,
             max_block_sec,
             silence_gap_sec,
             min_segment_sec,
@@ -438,6 +495,9 @@ def _run_recap(
             video_height,
             on_segment,
         )
+
+        if out_video:
+            all_recaps.append(Path(out_video))
 
         last_out_video = (
             str(out_video) if out_video and Path(out_video).is_file() else None
@@ -451,9 +511,24 @@ def _run_recap(
         last_segments.append(f"__EPISODE__::{gallery_label}")
         last_segments.extend(list_videos(cfg.output_dir / "segments"))
 
-
     #progress(1.0, desc="✅ All videos processed")
     pc.set(1.0, "✅ All videos processed")
+
+    if agglomerate_season and len(all_recaps) > 1:
+        season_out = base_output_dir / "Season_Recap.mp4"
+        concat_videos_ffmpeg(all_recaps, season_out)
+        last_out_video = season_out
+
+    # Apply speed ONCE, at the very end
+    # if last_out_video and speed_factor != 1.0:
+    #     last_out_video = str(
+    #         speed_up_video(Path(last_out_video), speed_factor)
+    #     )
+
+    if mode != "Rhythmic (2s in / 2s out)" and last_out_video and speed_factor != 1.0:
+        last_out_video = str(
+            speed_up_video(Path(last_out_video), speed_factor)
+        )
 
     #return last_out_video, last_segments
     return last_out_video, render_segments_with_separators(last_segments)    
@@ -465,7 +540,6 @@ def _run_shorts_ui(
     clean_before_run: bool,
     add_label: bool,
     video_height: int,
-    #progress=gr.Progress(track_tqdm=False),
     progress=None,
 ):
     if not video:
@@ -561,7 +635,6 @@ def _compute_fresh_until_label(pending_count: int) -> str:
     # show date clearly in Zurich time
     return f"Fresh-until: {dt.strftime('%Y-%m-%d %H:%M')} Europe/Zurich"
 
-
 def run_youtube_uploader(dry_run: bool = False):
     """
     Runs the uploader script and captures stdout.
@@ -607,9 +680,6 @@ def build_ui() -> gr.Blocks:
             height=260,
         )
         gr.Markdown("---")
-        # gr.Markdown(
-        #     "### 🎬 Automated Recaps & YouTube Shorts Engine",
-        # )
 
         with gr.Row():
             # LEFT COLUMN — Main Engine
@@ -659,10 +729,6 @@ def build_ui() -> gr.Blocks:
                 )
 
                 with gr.Row():
-                    # video_in = gr.File(
-                    #     label="Episode video (.mkv / .mp4)",
-                    #     file_count="single",
-                    # )
                     video_in = gr.File(
                         label="Episode videos (.mkv / .mp4)",
                         file_count="multiple",
@@ -704,6 +770,11 @@ def build_ui() -> gr.Blocks:
                         value=True,
                     )
 
+                    agglomerate_season = gr.Checkbox(
+                        label="Merge all episode recaps into ONE season recap",
+                        value=False,
+                    )
+
                 with gr.Accordion("Segment Settings", open=True) as subtitle_controls:
                     max_block = gr.Slider(
                         10, 120, value=20, step=1,
@@ -734,6 +805,13 @@ def build_ui() -> gr.Blocks:
                     add_label = gr.Checkbox(
                         label="Apply LadyAnime Shorts label overlay to shorts/recap",
                         value=True,
+                    )
+
+                    speed_factor = gr.Slider(
+                        1.0, 2.0,
+                        value=1.0,
+                        step=0.25,
+                        label="Recap playback speed",
                     )
 
                     video_height = gr.Slider(
@@ -775,14 +853,7 @@ def build_ui() -> gr.Blocks:
 
                 with gr.Row():
                     out_video = gr.Video(label="Recap Preview")
-                    #out_json = gr.File(label="segments.json (debug / AI input)")
 
-                # segments_gallery = gr.Gallery(
-                #     label="Generated Segments / Shorts",
-                #     columns=3,
-                #     height=320,
-                #     preview=True,
-                # )
                 segments_gallery = gr.Gallery(
                     label="Generated Segments / Shorts",
                     elem_id="segments-gallery",
@@ -793,6 +864,7 @@ def build_ui() -> gr.Blocks:
 
                 run_btn.click(
                     fn=_run_recap,
+
                     inputs=[
                         video_in,
                         srt_in,
@@ -802,6 +874,8 @@ def build_ui() -> gr.Blocks:
                         keep_sec,
                         skip_sec,
                         concat_final,
+                        agglomerate_season,
+                        speed_factor, 
                         max_block,
                         silence_gap,
                         min_seg,
@@ -1145,7 +1219,6 @@ def build_ui() -> gr.Blocks:
 
                     return res["log"], pending, uploaded_rows, fresh, bt2, state_view
                 
-                
                 def dry_run_handler(selected, pending_table, bt, desc, tags, privacy, progress=gr.Progress(track_tqdm=False)):
                     return _upload(
                         selected=selected,
@@ -1216,7 +1289,6 @@ def build_ui() -> gr.Blocks:
 def main():
     ui = build_ui()
     ui.launch()
-
 
 if __name__ == "__main__":
     main()

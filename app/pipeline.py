@@ -154,9 +154,17 @@ def run_rhythmic_recap(
     intro_skip_sec: float,
     keep_sec: float,
     skip_sec: float,
-    concat: bool,
+    speed_factor: float = 1.0,
+    emit_recap: bool = True,
     progress_cb=None,
 ) -> Path | None:
+
+    if speed_factor <= 0:
+        speed_factor = 1.0
+
+    intro_skip_sec /= speed_factor
+    keep_sec /= speed_factor
+    skip_sec /= speed_factor
 
     seg_dir = config.output_dir / "segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
@@ -173,10 +181,10 @@ def run_rhythmic_recap(
     if not segments:
         raise RuntimeError("No rhythmic segments produced.")
 
-    if not concat:
+    if not emit_recap:
         return None
 
-    out_video = config.output_dir / "recap.mp4"
+    out_video = config.output_dir / f"{config.output_basename}.mp4"
     concat_segments(segments, out_video)
     return out_video
 
