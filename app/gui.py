@@ -131,7 +131,7 @@ def get_video_duration(video_path: Path) -> float:
     return float(data["format"]["duration"])
 
 def render_segments_with_separators(items):
-    placeholder = str(_project_root() / "data/assets/blank.png")
+    placeholder = str(_project_root() / "data/assets/blank.jpg")
     rendered = []
 
     for it in items:
@@ -257,6 +257,7 @@ def _process_single_video(
     base_output_dir: Path,
     mode: str,
     intro_skip: float,
+    outro_skip: float,
     keep_sec: float,
     skip_sec: float,
     concat_final: bool,
@@ -271,7 +272,7 @@ def _process_single_video(
     video_height: int,
     progress,
 ):
-
+    RHYTHMIC_MODE = "Rhythmic (2s in / 2s out)"
     video_name = Path(video).stem
     safe_name = video_name.replace(" ", "_")
 
@@ -282,7 +283,7 @@ def _process_single_video(
         raise gr.Error("🛑 Processing stopped by user.")
 
     # ---------- rhythmic ----------
-    if mode == "Rhythmic (2s in / 2s out)":
+    if mode == RHYTHMIC_MODE:
         video_filename, _ = _copy_to_inputs(video, None)
 
         # cfg = AppConfig(
@@ -301,31 +302,19 @@ def _process_single_video(
             output_subdir=safe_name,
         )
 
-        # out = run_rhythmic_recap(
-        #     config=cfg,
-        #     intro_skip_sec=intro_skip,
-        #     keep_sec=keep_sec,
-        #     skip_sec=skip_sec,
-        #     concat=concat_final,
-        #     progress_cb=guarded_progress_cb(
-        #         progress,
-        #         prefix=f"{video_name}: "
-        #     ),
-        # )
-
         out = run_rhythmic_recap(
             config=cfg,
             intro_skip_sec=intro_skip,
+            outro_skip_sec=outro_skip,
             keep_sec=keep_sec,
             skip_sec=skip_sec,
-            speed_factor=speed_factor,   # 👈 NEW
-            concat=concat_final,
+            speed_factor=speed_factor,
+            emit_recap=concat_final,
             progress_cb=guarded_progress_cb(
                 progress,
                 prefix=f"{video_name}: "
             ),
         )
-
 
         return cfg, out
 
@@ -408,6 +397,7 @@ def _run_recap(
     output_dir,
     mode,
     intro_skip,
+    outro_skip,
     keep_sec,
     skip_sec,
     concat_final,
@@ -481,6 +471,7 @@ def _run_recap(
             base_output_dir,
             mode,
             intro_skip,
+            outro_skip,
             keep_sec,
             skip_sec,
             concat_final,
@@ -724,7 +715,7 @@ def build_ui() -> gr.Blocks:
 
                 mode = gr.Radio(
                     ["Subtitle-based", "Rhythmic (2s in / 2s out)"],
-                    value="Subtitle-based",
+                    value="Rhythmic (2s in / 2s out)",
                     label="Recap Mode",
                 )
 
@@ -754,6 +745,11 @@ def build_ui() -> gr.Blocks:
                         label="Intro skip (seconds)",
                         info="Skip opening / recap / OP",
                     )
+                    outro_skip = gr.Slider(
+                        0, 300, value=60, step=1,
+                        label="Outro skip (seconds)",
+                        info="Skip ending / ED / preview",
+                    )
 
                     keep_sec = gr.Slider(
                         0.5, 10, value=2, step=0.5,
@@ -775,7 +771,15 @@ def build_ui() -> gr.Blocks:
                         value=False,
                     )
 
-                with gr.Accordion("Segment Settings", open=True) as subtitle_controls:
+                    speed_factor = gr.Slider(
+                        0.75, 2.0,
+                        value=1.0,
+                        step=0.25,
+                        label="Playback speed",
+                        info="Applied during rhythmic cutting (not post-processed)",
+                    )
+
+                with gr.Accordion("Segment Settings", open=False) as subtitle_controls:
                     max_block = gr.Slider(
                         10, 120, value=20, step=1,
                         label="Target segment length (sec)",
@@ -807,13 +811,6 @@ def build_ui() -> gr.Blocks:
                         value=True,
                     )
 
-                    speed_factor = gr.Slider(
-                        1.0, 2.0,
-                        value=1.0,
-                        step=0.25,
-                        label="Recap playback speed",
-                    )
-
                     video_height = gr.Slider(
                         1000,
                         1400,
@@ -831,6 +828,11 @@ def build_ui() -> gr.Blocks:
                         rhythmic_accordion,
                         subtitle_controls,
                     ],
+                )
+                # Force correct visibility on initial load
+                demo.load(
+                    fn=lambda: _toggle_recap_mode("Rhythmic (2s in / 2s out)"),
+                    outputs=[srt_in, rhythmic_accordion, subtitle_controls],
                 )
 
                 output_dir_picker = gr.Textbox(
@@ -871,6 +873,7 @@ def build_ui() -> gr.Blocks:
                         output_dir_picker,
                         mode,
                         intro_skip,
+                        outro_skip,
                         keep_sec,
                         skip_sec,
                         concat_final,

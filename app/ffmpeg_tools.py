@@ -31,6 +31,7 @@ def rhythmic_cut(
     video_path: Path,
     out_dir: Path,
     start_offset: float,
+    end_offset: float,
     keep_sec: float,
     skip_sec: float,
     progress_cb=None,
@@ -49,17 +50,20 @@ def rhythmic_cut(
         "-of", "default=noprint_wrappers=1:nokey=1",
         str(video_path),
     ]
-    duration = float(subprocess.check_output(probe_cmd).decode().strip())
+    #duration = float(subprocess.check_output(probe_cmd).decode().strip())
 
     t = start_offset
     idx = 1
     outputs: list[Path] = []
 
-    while t + keep_sec <= duration:
+    while t + keep_sec <= end_offset:
         out_path = out_dir / f"seg_{idx:03d}.mp4"
 
         if progress_cb:
-            progress_cb(t / duration, f"Cutting segment {idx}")
+            progress_cb(
+                (t - start_offset) / max(1e-6, (end_offset - start_offset)),
+                f"Cutting segment {idx}"
+            )
 
         cmd = [
             "ffmpeg", "-y",
@@ -243,6 +247,16 @@ def overlay_label_to_segments(
         labeled_segments.append(out_path)
 
     return labeled_segments
+
+def get_video_duration(video_path: Path) -> float:
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(video_path),
+    ]
+    return float(subprocess.check_output(cmd).decode().strip())
 
 def concat_segments(segment_files: List[Path], output_path: Path) -> None:
     """

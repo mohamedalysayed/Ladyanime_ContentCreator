@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+from .ffmpeg_tools import get_video_duration
 from pathlib import Path
 from typing import List, Callable, Optional
 
@@ -152,6 +152,7 @@ def run_mvp(
 def run_rhythmic_recap(
     config: AppConfig,
     intro_skip_sec: float,
+    outro_skip_sec: float,
     keep_sec: float,
     skip_sec: float,
     speed_factor: float = 1.0,
@@ -169,14 +170,21 @@ def run_rhythmic_recap(
     seg_dir = config.output_dir / "segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
 
+    duration = get_video_duration(config.video_path)
+    start_t = max(0.0, intro_skip_sec)
+    end_t   = max(start_t, duration - outro_skip_sec)
+    #active_duration = end_t - start_t
+
     segments = rhythmic_cut(
         video_path=config.video_path,
         out_dir=seg_dir,
-        start_offset=intro_skip_sec,
+        start_offset=start_t,
+        end_offset=end_t,
         keep_sec=keep_sec,
         skip_sec=skip_sec,
         progress_cb=progress_cb,
     )
+
 
     if not segments:
         raise RuntimeError("No rhythmic segments produced.")
