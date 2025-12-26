@@ -1,577 +1,16 @@
-from __future__ import annotations
-import threading
-import time
-from .transcribe import transcribe_to_srt
-import shutil
-from pathlib import Path
-from typing import Optional
-import subprocess
-import json
+
 import gradio as gr
-from .config import AppConfig
-from .pipeline import run_mvp, run_shorts, run_rhythmic_recap
-from .segment_matcher import Segment
-from .ffmpeg_tools import overlay_label_to_segments
-
-
-class ProgressController:
-    def __init__(self, progress: gr.Progress, prefix: str = ""):
-        self.progress = progress
-        self.prefix = prefix
-
-    def set(self, frac: float, msg: str):
-        if STOP_EVENT.is_set():
-            raise gr.Error("🛑 Processing stopped by user.")
-        self.progress(max(0.0, min(frac, 1.0)), desc=f"{self.prefix}{msg}")
-
-    def map(self, base: float, span: float, frac: float, msg: str):
-        self.set(base + span * frac, msg)
-
-# ----------------------------------------------------------------------
-# Global stop signal (thread-safe)
-# ----------------------------------------------------------------------
-STOP_EVENT = threading.Event()
-def guarded_progress_cb(progress, prefix: str = ""):
-    def _cb(frac: float, msg: str):
-        if STOP_EVENT.is_set():
-            raise gr.Error("🛑 Processing stopped by user.")
-        progress_call(progress, frac, f"{prefix}{msg}")
-    return _cb
-
-def progress_call(progress_fn, frac: float, msg: str):
-    """
-    Call progress function safely regardless of whether it expects:
-    - progress(frac, desc="...")
-    OR
-    - progress(frac, "...")
-    """
-    try:
-        progress_fn(frac, desc=msg)
-    except TypeError:
-        progress_fn(frac, msg)
-
-# ----------------------------------------------------------------------
-# Helpers
-# ----------------------------------------------------------------------
-
-def _project_root() -> Path:
-    # app/ -> project root
-    return Path(__file__).resolve().parents[1]
-
-def _ensure_dirs() -> tuple[Path, Path]:
-    root = _project_root()
-    input_dir = root / "data" / "input"
-    output_dir = root / "data" / "output"
-    input_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return input_dir, output_dir
-
-def _copy_to_inputs(
-    video_file: str,
-    srt_file: Optional[str],
-) -> tuple[str, Optional[str]]:
-    """
-    Copy user-uploaded files into data/input with stable names expected by AppConfig.
-
-    - Video is always required
-    - Subtitles are OPTIONAL (shorts mode)
-    - Preserves video extension (mkv/mp4/etc)
-    """
-    input_dir, _ = _ensure_dirs()
-
-    # ---- video (always) ----
-    vsrc = Path(video_file)
-    vdst = input_dir / f"video{vsrc.suffix.lower()}"
-    shutil.copy2(vsrc, vdst)
-
-    # ---- subtitles (optional) ----
-    if srt_file:
-        ssrc = Path(srt_file)
-        sdst = input_dir / "subtitles.srt"
-        shutil.copy2(ssrc, sdst)
-        return vdst.name, sdst.name
-
-    # shorts mode → no subtitles
-    return vdst.name, None
-
-def clean_output_dir(output_dir: Path) -> None:
-    """
-    Remove old generated outputs before starting a new run.
-    Safe: only touches known output artifacts.
-    """
-    if not output_dir.exists():
-        return
-
-    for item in output_dir.iterdir():
-        if item.is_dir() and item.name in {
-            "segments",
-            "segments_labeled",
-            "shorts",
-        }:
-            shutil.rmtree(item, ignore_errors=True)
-
-        elif item.is_file() and item.suffix in {".mp4", ".json", ".txt"}:
-            item.unlink(missing_ok=True)
-
-def list_videos(dir_path: Path) -> list[str]:
-    if not dir_path.exists():
-        return []
-    return [str(p) for p in sorted(dir_path.glob("*.mp4"))]
-
-def get_video_duration(video_path: Path) -> float:
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "json",
-        str(video_path)
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    data = json.loads(result.stdout)
-    return float(data["format"]["duration"])
-
-def render_segments_with_separators(items):
-    placeholder = str(_project_root() / "data/assets/blank.jpg")
-    rendered = []
-
-    for it in items:
-        if isinstance(it, str) and it.startswith("__EPISODE__::"):
-            rendered.append((placeholder, it.replace("__EPISODE__::", "")))
-        else:
-            rendered.append(it)
-
-    return rendered
-
-def concat_videos_ffmpeg(videos: list[Path], output: Path):
-    txt = output.parent / "concat_list.txt"
-    with txt.open("w") as f:
-        for v in videos:
-            f.write(f"file '{v.as_posix()}'\n")
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", str(txt),
-        "-map", "0:v:0",
-        "-map", "0:a?",
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "18",
-        "-c:a", "aac",
-        "-movflags", "+faststart",
-        str(output),
-    ]
-    subprocess.run(cmd, check=True)
-
-def speed_up_video(input_v: Path, factor: float) -> Path:
-    if factor == 1.0:
-        return input_v
-
-    out = input_v.with_name(input_v.stem + f"_x{factor}.mp4")
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(input_v),
-        "-filter_complex",
-        f"[0:v]setpts={1/factor}*PTS[v];[0:a]atempo={factor}[a]",
-        "-map", "[v]",
-        "-map", "[a]",
-        str(out),
-    ]
-    subprocess.run(cmd, check=True)
-    return out
-
-# ----------------------------------------------------------------------
-# Gradio worker with GLOBAL progress bar
-# ----------------------------------------------------------------------
-def detect_existing_segments(output_dir: Path) -> list[Path]:
-    """
-    Detect already-created segment files.
-    """
-    seg_dir = output_dir / "segments"
-    if not seg_dir.exists():
-        return []
-
-    return sorted(seg_dir.glob("seg_*.mp4"))
-
-def run_transcription(
-    video: str,
-    model: str,
-    language: Optional[str],
-    #progress=gr.Progress(track_tqdm=False),
-    progress=None,
-):
-    if progress is None:
-        def progress(*args, **kwargs):
-            pass
-    input_dir, _ = _ensure_dirs()
-
-    video_path = Path(video)
-    srt_path = input_dir / "transcription.srt"
-
-    duration = get_video_duration(video_path)
-
-    transcription_done = False
-    transcription_text = ""
-
-    def _worker():
-        nonlocal transcription_done, transcription_text
-        transcription_text = transcribe_to_srt(
-            video_path=video_path,
-            srt_out=srt_path,
-            model_name=model,
-            language=language or None,
-        )
-        transcription_done = True
-
-    thread = threading.Thread(target=_worker)
-    thread.start()
-
-    # ---- smooth fake progress ----
-    start = time.time()
-    max_wait = duration * 0.9  # realistic cap
-
-    while not transcription_done:
-        if STOP_EVENT.is_set():
-            progress(1.0, desc="🛑 Transcription stopped")
-            return None, ""
-        elapsed = time.time() - start
-        frac = min(elapsed / max_wait, 0.95)
-
-        progress(
-            0.15 + frac * 0.75,
-            desc="🎧 Transcribing audio (AI is working)…",
-        )
-        time.sleep(0.25)
-
-    thread.join()
-
-    progress(1.0, desc="✅ Transcription completed")
-
-    return str(srt_path), transcription_text
-
-def _process_single_video(
-    video: str,
-    subtitles: Optional[str],
-    base_output_dir: Path,
-    mode: str,
-    intro_skip: float,
-    outro_skip: float,
-    keep_sec: float,
-    skip_sec: float,
-    concat_final: bool,
-    speed_factor: float, 
-    max_block_sec: float,
-    silence_gap_sec: float,
-    min_segment_sec: float,
-    max_segments: int,
-    clean_before_run: bool,
-    use_existing: bool,
-    add_label: bool,
-    video_height: int,
-    progress,
-):
-    RHYTHMIC_MODE = "Rhythmic (2s in / 2s out)"
-    video_name = Path(video).stem
-    safe_name = video_name.replace(" ", "_")
-
-    #progress(0.0, desc=f"📼 Processing {video_name}")
-    progress_call(progress, 0.0, f"📼 Processing {video_name}")
-
-    if STOP_EVENT.is_set():
-        raise gr.Error("🛑 Processing stopped by user.")
-
-    # ---------- rhythmic ----------
-    if mode == RHYTHMIC_MODE:
-        video_filename, _ = _copy_to_inputs(video, None)
-
-        # cfg = AppConfig(
-        #     video_filename=video_filename,
-        #     subtitles_filename=None,
-        #     max_segments=9999,
-        #     output_basename="recap",
-        #     output_subdir=safe_name,
-        # )
-
-        cfg = AppConfig(
-            video_filename=video_filename,
-            subtitles_filename=None,
-            max_segments=9999,
-            output_basename=f"{safe_name}_recap",
-            output_subdir=safe_name,
-        )
-
-        out = run_rhythmic_recap(
-            config=cfg,
-            intro_skip_sec=intro_skip,
-            outro_skip_sec=outro_skip,
-            keep_sec=keep_sec,
-            skip_sec=skip_sec,
-            speed_factor=speed_factor,
-            emit_recap=concat_final,
-            progress_cb=guarded_progress_cb(
-                progress,
-                prefix=f"{video_name}: "
-            ),
-        )
-
-        return cfg, out
-
-    # ---------- subtitle-based ----------
-    if not subtitles:
-        video_filename, _ = _copy_to_inputs(video, None)
-        srt_path = _project_root() / "data" / "input" / "subtitles.srt"
-        transcribe_to_srt(
-            video_path=_project_root() / "data" / "input" / video_filename,
-            srt_out=srt_path,
-        )
-        subtitles = str(srt_path)
-
-    video_filename, srt_filename = _copy_to_inputs(video, subtitles)
-
-    # cfg = AppConfig(
-    #     video_filename=video_filename,
-    #     subtitles_filename=srt_filename,
-    #     max_segments=int(max_segments),
-    #     output_basename="recap",
-    #     output_subdir=safe_name,
-    #     output_root=base_output_dir,   # 👈 NEW
-    # )
-
-    cfg = AppConfig(
-        video_filename=video_filename,
-        subtitles_filename=srt_filename,
-        max_segments=int(max_segments),
-        output_basename=f"{safe_name}_recap",
-        output_subdir=safe_name,
-        output_root=base_output_dir,
-    )
-
-    if clean_before_run:
-        clean_output_dir(cfg.output_dir)
-
-    def guarded_progress(i: int, t: int, s: Segment):
-        if STOP_EVENT.is_set():
-            raise gr.Error("🛑 Processing stopped by user.")
-        #progress(i / max(t, 1), f"{video_name}: segment {i}/{t}")
-        progress_call(progress, i / max(t, 1), f"{video_name}: segment {i}/{t}")
-
-    # Reuse existing segments if requested
-    if use_existing:
-        existing = detect_existing_segments(cfg.output_dir)
-        if existing:
-            progress_call(
-                progress,
-                0.05,
-                f"{video_name}: using existing {len(existing)} segments",
-            )
-
-            # If concat_final → reuse existing recap if available
-            recap = cfg.output_dir / f"{cfg.output_basename}.mp4"
-            if recap.exists():
-                return cfg, recap
-
-            # Otherwise, just reuse segments (viewer still works)
-            return cfg, None
-
-    out_video = run_mvp(
-        cfg,
-        progress_cb=guarded_progress,
-        max_block_sec=max_block_sec,
-        silence_gap_sec=silence_gap_sec,
-        min_segment_sec=min_segment_sec,
-    )
-
-    if add_label and out_video:
-        from .ffmpeg_tools import overlay_label
-        labeled = cfg.output_dir / "recap_labeled.mp4"
-        overlay_label(out_video, _project_root() / "data/shorts_label/shortsLabel_LA.mp4", labeled, video_height)
-        out_video = labeled
-
-    return cfg, out_video
-
-def _run_recap(
-    video,
-    subtitles,
-    output_dir,
-    mode,
-    intro_skip,
-    outro_skip,
-    keep_sec,
-    skip_sec,
-    concat_final,
-    agglomerate_season,
-    speed_factor, 
-    max_block_sec,
-    silence_gap_sec,
-    min_segment_sec,
-    max_segments,
-    clean_before_run,
-    use_existing,
-    add_label,
-    video_height,
-    progress=gr.Progress(track_tqdm=False),
-):
-    from pathlib import Path
-    if output_dir:
-        base_output_dir = Path(output_dir)
-    else:
-        base_output_dir = _project_root() / "data" / "output"
-
-    all_recaps = []
-
-    STOP_EVENT.clear()
-
-    pc = ProgressController(progress)
-    pc.set(0.02, "Preparing job…")
-
-    if not video or (isinstance(video, list) and len(video) == 0):
-        raise gr.Error(
-            "🚫 No videos selected.\n\n"
-            "Please upload one or more episode videos (.mp4 or .mkv) "
-            "before clicking **Generate Recap**."
-        )
-
-    videos = video if isinstance(video, list) else [video]
-    total = len(videos)
-    per_video_span = 0.80 / total   # progress range: 15% → 95%
-
-    last_out_video = None
-    last_segments = []
-
-    for idx, v in enumerate(videos, start=1):
-
-        if STOP_EVENT.is_set():
-            progress(1.0, desc="🛑 Processing stopped")
-            #return None, None, []
-            return None, []
-        
-        video_base = 0.15 + (idx - 1) * per_video_span
-        #pc.set(video_base, f"Processing {Path(v).stem}")
-        episode_label = f"S1 · Episode {idx}/{total}"
-        episode_name = Path(v).stem
-
-        pc.set(
-            video_base,
-            f"{episode_label} — {episode_name}"
-        )
-        
-        def on_segment(frac, msg):
-            pc.map(
-                base=video_base,
-                span=per_video_span * 0.85,
-                frac=frac,
-                msg=f"{episode_label} — {msg}",
-            )
-
-        cfg, out_video = _process_single_video(
-            v,
-            subtitles,
-            base_output_dir,
-            mode,
-            intro_skip,
-            outro_skip,
-            keep_sec,
-            skip_sec,
-            concat_final,
-            speed_factor,
-            max_block_sec,
-            silence_gap_sec,
-            min_segment_sec,
-            max_segments,
-            clean_before_run,
-            use_existing,
-            add_label,
-            video_height,
-            on_segment,
-        )
-
-        if out_video:
-            all_recaps.append(Path(out_video))
-
-        last_out_video = (
-            str(out_video) if out_video and Path(out_video).is_file() else None
-        )
-
-        json_path = cfg.output_dir / "segments.json"
-        last_json = str(json_path) if json_path.exists() else None
-
-        #last_segments = list_videos(cfg.output_dir / "segments")
-        gallery_label = f"🧩 {Path(v).stem}"
-        last_segments.append(f"__EPISODE__::{gallery_label}")
-        last_segments.extend(list_videos(cfg.output_dir / "segments"))
-
-    #progress(1.0, desc="✅ All videos processed")
-    pc.set(1.0, "✅ All videos processed")
-
-    if agglomerate_season and len(all_recaps) > 1:
-        season_out = base_output_dir / "Season_Recap.mp4"
-        concat_videos_ffmpeg(all_recaps, season_out)
-        last_out_video = season_out
-
-    # Apply speed ONCE, at the very end
-    # if last_out_video and speed_factor != 1.0:
-    #     last_out_video = str(
-    #         speed_up_video(Path(last_out_video), speed_factor)
-    #     )
-
-    if mode != "Rhythmic (2s in / 2s out)" and last_out_video and speed_factor != 1.0:
-        last_out_video = str(
-            speed_up_video(Path(last_out_video), speed_factor)
-        )
-
-    #return last_out_video, last_segments
-    return last_out_video, render_segments_with_separators(last_segments)    
-
-def _run_shorts_ui(
-    video: Optional[str],
-    clip_duration: int,
-    max_shorts: int,
-    clean_before_run: bool,
-    add_label: bool,
-    video_height: int,
-    progress=None,
-):
-    if not video:
-        raise gr.Error("Please upload a video.")
-
-    progress(0.05, desc="Preparing files…")
-
-    video_filename, _ = _copy_to_inputs(video, None)
-
-    cfg = AppConfig(
-        video_filename=video_filename,
-        subtitles_filename=None,
-        max_segments=int(max_shorts),
-        output_basename="shorts",
-    )
-
-    if clean_before_run:
-        clean_output_dir(cfg.output_dir)
-
-    def on_shorts_progress(i: int, total: int):
-        base = 0.10
-        span = 0.80
-        frac = base + span * (i / max(total, 1))
-        progress(frac, desc=f"Creating short {i+1} / {total}")
-
-    out_clip = run_shorts(
-        video_path=cfg.video_path,
-        out_dir=cfg.output_dir / "shorts",
-        clip_duration=int(clip_duration),
-        add_label=add_label,
-        video_height=video_height,
-        progress_cb=on_shorts_progress,
-        max_shorts=int(max_shorts),
-    )
-
-    progress(1.0, desc="Done ✔")
-
-    shorts_dir = cfg.output_dir / "shorts"
-    shorts_videos = list_videos(shorts_dir)
-
-    return str(out_clip), shorts_videos
+import json
+import subprocess
+from pathlib import Path
+
+from .ui_handlers import (
+    _run_recap,
+    _run_shorts_ui,
+    run_transcription,
+)
+from .ui_progress import STOP_EVENT
+from .ui_helpers import project_root, split_narration_text
 
 # ----------------------------------------------------------------------
 # UI definition
@@ -665,7 +104,7 @@ def build_ui() -> gr.Blocks:
         """
     ) as demo:
         gr.Image(
-            value=str(_project_root() / "data" / "assets" / "ladyAnime_banner.jpg"),
+            value=str(project_root() / "data" / "assets" / "ladyAnime_banner.jpg"),
             show_label=False,
             container=False,
             height=260,
@@ -695,14 +134,14 @@ def build_ui() -> gr.Blocks:
                     """
         ## AI Companion Tool 
 
-        🧠 **Summaries & Text-to-Speech Generator**
+        **Summaries & Text-to-Speech Generator**
 
         A lightweight AI assistant for:
         - Generate summaries
         - Voice-over generation
         - Script preparation
 
-        👉 **[Open Tool HERE ↗](https://lady-anime-agent-front-end-vwa5.vercel.app/)**
+        **[Open Tool HERE ↗](https://lady-anime-agent-front-end-vwa5.vercel.app/)**
         """
                 )
 
@@ -741,23 +180,23 @@ def build_ui() -> gr.Blocks:
 
                 with gr.Accordion("Rhythmic Recap Settings", open=False, visible=False) as rhythmic_accordion:
                     intro_skip = gr.Slider(
-                        0, 300, value=90, step=1,
+                        0, 500, value=90, step=1,
                         label="Intro skip (seconds)",
                         info="Skip opening / recap / OP",
                     )
                     outro_skip = gr.Slider(
-                        0, 300, value=60, step=1,
+                        0, 500, value=60, step=1,
                         label="Outro skip (seconds)",
                         info="Skip ending / ED / preview",
                     )
 
                     keep_sec = gr.Slider(
-                        0.5, 10, value=2, step=0.5,
+                        0.5, 100, value=2, step=0.5,
                         label="Keep duration (seconds)",
                     )
 
                     skip_sec = gr.Slider(
-                        0.5, 10, value=2, step=0.5,
+                        0.5, 100, value=2, step=0.5,
                         label="Skip duration (seconds)",
                     )
 
@@ -772,11 +211,16 @@ def build_ui() -> gr.Blocks:
                     )
 
                     speed_factor = gr.Slider(
-                        0.75, 2.0,
+                        0.5, 2.0,
                         value=1.0,
                         step=0.25,
                         label="Playback speed",
                         info="Applied during rhythmic cutting (not post-processed)",
+                    )
+
+                    ai_narration = gr.Checkbox(
+                        label="Generate AI Narrated Recap",
+                        value=False,
                     )
 
                 with gr.Accordion("Segment Settings", open=False) as subtitle_controls:
@@ -853,6 +297,48 @@ def build_ui() -> gr.Blocks:
                     outputs=[],
                 )
 
+                # narration_text_box = gr.Textbox(
+                #     label="AI Narration — Original vs Summary",
+                #     lines=20,
+                #     visible=False,
+                # )
+
+                narration_text_hidden = gr.Textbox(
+                    visible=False,
+                    interactive=False,
+                )
+
+                with gr.Row():
+                    original_box = gr.Textbox(
+                        label="📝 Original Dialogue (Extracted)",
+                        lines=18,
+                        interactive=False,
+                    )
+
+                    summary_box = gr.Textbox(
+                        label="🎙 AI Narration (Summary)",
+                        lines=18,
+                        interactive=False,
+                    )
+
+
+                # def _toggle_narration_panel(flag):
+                #     return gr.update(visible=flag)
+
+                # ai_narration.change(
+                #     fn=_toggle_narration_panel,
+                #     inputs=ai_narration,
+                #     outputs=narration_text_box,
+                # )
+                def _toggle_narration_panel(flag):
+                    return gr.update(visible=flag)
+
+                ai_narration.change(
+                    fn=_toggle_narration_panel,
+                    inputs=ai_narration,
+                    outputs=narration_text_hidden,
+                )
+
                 with gr.Row():
                     out_video = gr.Video(label="Recap Preview")
 
@@ -887,9 +373,14 @@ def build_ui() -> gr.Blocks:
                         use_existing,
                         add_label,
                         video_height,
+                        ai_narration,
                     ],
-                    outputs=[out_video, segments_gallery],
-                )
+                    outputs=[out_video, segments_gallery, narration_text_hidden],
+                ).then(
+                    split_narration_text,
+                    inputs=narration_text_hidden,
+                    outputs=[original_box, summary_box],
+                )                    
 
             # ======================================================
             # TAB 2: YouTube Shorts
@@ -1291,7 +782,10 @@ def build_ui() -> gr.Blocks:
 
 def main():
     ui = build_ui()
-    ui.launch()
+    ui.queue()
+    ui.launch(
+        max_threads=1
+    )
 
 if __name__ == "__main__":
     main()

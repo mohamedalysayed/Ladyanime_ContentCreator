@@ -35,34 +35,27 @@ def rhythmic_cut(
     keep_sec: float,
     skip_sec: float,
     progress_cb=None,
-) -> list[Path]:
+) -> tuple[list[Path], list[dict]]:
     """
-    Cuts video in rhythmic fashion:
-    keep X sec, skip Y sec, repeat.
+    Cuts video in rhythmic fashion and RETURNS TIMELINE.
     """
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Probe duration
-    probe_cmd = [
-        "ffprobe", "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        str(video_path),
-    ]
-    #duration = float(subprocess.check_output(probe_cmd).decode().strip())
-
     t = start_offset
     idx = 1
     outputs: list[Path] = []
+    timeline: list[dict] = []
+
+    total_span = max(1e-6, end_offset - start_offset)
 
     while t + keep_sec <= end_offset:
         out_path = out_dir / f"seg_{idx:03d}.mp4"
 
         if progress_cb:
             progress_cb(
-                (t - start_offset) / max(1e-6, (end_offset - start_offset)),
-                f"Cutting segment {idx}"
+                (t - start_offset) / total_span,
+                f"Cutting segment {idx}",
             )
 
         cmd = [
@@ -80,12 +73,18 @@ def rhythmic_cut(
         ]
 
         subprocess.run(cmd, check=True)
+
         outputs.append(out_path)
+        timeline.append({
+            "start_s": t,
+            "end_s": t + keep_sec,
+        })
 
         t += keep_sec + skip_sec
         idx += 1
 
-    return outputs
+    return outputs, timeline
+
 
 def write_segments_json(path: Path, segments: List[Segment]) -> None:
     payload = [asdict(s) for s in segments]

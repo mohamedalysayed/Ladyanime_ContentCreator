@@ -158,6 +158,7 @@ def run_rhythmic_recap(
     speed_factor: float = 1.0,
     emit_recap: bool = True,
     progress_cb=None,
+    return_timeline: bool = False,
 ) -> Path | None:
 
     if speed_factor <= 0:
@@ -175,7 +176,7 @@ def run_rhythmic_recap(
     end_t   = max(start_t, duration - outro_skip_sec)
     #active_duration = end_t - start_t
 
-    segments = rhythmic_cut(
+    segments, timeline = rhythmic_cut(
         video_path=config.video_path,
         out_dir=seg_dir,
         start_offset=start_t,
@@ -185,15 +186,18 @@ def run_rhythmic_recap(
         progress_cb=progress_cb,
     )
 
-
     if not segments:
         raise RuntimeError("No rhythmic segments produced.")
 
     if not emit_recap:
-        return None
+        return (None, timeline) if return_timeline else None
 
     out_video = config.output_dir / f"{config.output_basename}.mp4"
     concat_segments(segments, out_video)
+
+    if return_timeline:
+        return out_video, timeline
+
     return out_video
 
 def run_shorts(
