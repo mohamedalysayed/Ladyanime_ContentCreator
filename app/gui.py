@@ -741,23 +741,23 @@ def build_ui() -> gr.Blocks:
 
                 with gr.Accordion("Rhythmic Recap Settings", open=False, visible=False) as rhythmic_accordion:
                     intro_skip = gr.Slider(
-                        0, 300, value=90, step=1,
+                        0, 500, value=90, step=1,
                         label="Intro skip (seconds)",
                         info="Skip opening / recap / OP",
                     )
                     outro_skip = gr.Slider(
-                        0, 300, value=60, step=1,
+                        0, 500, value=60, step=1,
                         label="Outro skip (seconds)",
                         info="Skip ending / ED / preview",
                     )
 
                     keep_sec = gr.Slider(
-                        0.5, 10, value=2, step=0.5,
+                        0.5, 500, value=2, step=0.5,
                         label="Keep duration (seconds)",
                     )
 
                     skip_sec = gr.Slider(
-                        0.5, 10, value=2, step=0.5,
+                        0.5, 500, value=2, step=0.5,
                         label="Skip duration (seconds)",
                     )
 
@@ -772,7 +772,7 @@ def build_ui() -> gr.Blocks:
                     )
 
                     speed_factor = gr.Slider(
-                        0.75, 2.0,
+                        0.5, 2.0,
                         value=1.0,
                         step=0.25,
                         label="Playback speed",
